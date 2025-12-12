@@ -3481,6 +3481,7 @@ def clfHyperFit(feat, lbl, t1, pipe_clf, param_grid, cv=3, bagging=[0, None, 1.]
     # else:
     #     scoring = 'neg_log_loss'  # 对数损失，用于多分类问题
     scoring = 'neg_log_loss'  # 对9.1的临时使用
+    # scoring = 'accuracy'
 
     inner_cv = PurgedKFold(n_splits=cv, t1=t1, pctEmbargo=pctEmbargo)  
 
@@ -3511,8 +3512,8 @@ def clfHyperFit(feat, lbl, t1, pipe_clf, param_grid, cv=3, bagging=[0, None, 1.]
         final_model  = Pipeline([('bag', gs)])
     else:
         final_model = best_estimator
-    # 5) 返回最终的模型
-    return final_model
+    # 5) 返回最终的模型,搜索的结果
+    return final_model,gs
 
 trnsX,cont=getTestData(n_features=10,n_informative=5,n_redundant=0,n_samples=10000)
 
@@ -3530,7 +3531,7 @@ param_grid = {
 
 #网格搜索
 print('开始时间：',dt.datetime.now() )
-svc_model_GS=clfHyperFit(feat=trnsX, lbl=cont['bin'], t1=cont['t1'], pipe_clf=pipe, param_grid=param_grid, cv=10, bagging=[0, 0, 1.], rndSearchIter=0,pctEmbargo=0.01, **{'svc__sample_weight':cont['w']})
+svc_model_GS,svc_GS_gs=clfHyperFit(feat=trnsX, lbl=cont['bin'], t1=cont['t1'], pipe_clf=pipe, param_grid=param_grid, cv=10, bagging=[0, 0, 1.], rndSearchIter=0,pctEmbargo=0.01, **{'svc__sample_weight':cont['w']})
 print('结束时间：',dt.datetime.now() )
 
 
@@ -3598,13 +3599,13 @@ param_grid = {
 
 
 print('开始时间：',dt.datetime.now() )
-svc_model=clfHyperFit(feat=trnsX, lbl=cont['bin'], t1=cont['t1'], pipe_clf=pipe, param_grid=param_grid, cv=10, bagging=[0, 0, 1.], rndSearchIter=25,pctEmbargo=0.01, **{'svc__sample_weight':cont['w']})
+svc_model_RS,svc_RS_gs=clfHyperFit(feat=trnsX, lbl=cont['bin'], t1=cont['t1'], pipe_clf=pipe, param_grid=param_grid, cv=10, bagging=[0, 0, 1.], rndSearchIter=25,pctEmbargo=0.01, **{'svc__sample_weight':cont['w']})
 print('结束时间',dt.datetime.now() )
 
 #b 花费时间只有25分钟，明显变快了
 
 #c 'C': 0.20446553804452852,'gamma': 0.1902583355975827  在上一份里面'C': 1，'gamma': 0.1,数据是接近的，但是不是一样
-best_params =svc_model.named_steps['svc'].get_params() 
+best_params =svc_model_RS.named_steps['svc'].get_params() 
 
 #d 最优 CV 得分: -0.6300694759525192 ，在上一份练习 -0.6569474181788084.比之前的快，而且得分更高
 
@@ -3618,10 +3619,32 @@ best_params =svc_model.named_steps['svc'].get_params()
  (c) What scoring method leads to higher (in-sample) Sharpe ratio?
 '''
 
-#计算样本内的夏普
+#计算样本内的夏普  这不是标准夏普，只是类似夏普的一个均值/方差得分稳定性 参考性不高
+def in_sample_sharpe_ratio(clf):
+    sharpe_ratio = []
+    for i in np.arange(len(clf.cv_results_['mean_test_score'])):
+        if clf.cv_results_['mean_test_score'][i] < 0:
+            sharpe_ratio.append(-1 * clf.cv_results_['mean_test_score'][i]/ clf.cv_results_['std_test_score'][i])
+        else:
+            sharpe_ratio.append(clf.cv_results_['mean_test_score'][i]/ clf.cv_results_['std_test_score'][i])
+    print("IS Best Score Sharpe Ratio: {0:.6f}".format(sharpe_ratio[clf.best_index_]))
+    print("Best IS Sharpe ratio: {0:.6f}\nLowest IS Sharpe Ratio: {1:.6f}\nMean Sharpe Ratio: {2:.6f}".format(max(sharpe_ratio), min(sharpe_ratio), np.mean(sharpe_ratio)))
+
+in_sample_sharpe_ratio(svc_GS_gs)
+#IS Best Score Sharpe Ratio: 8.743683
+# Best IS Sharpe ratio: 24.950627
+# Lowest IS Sharpe Ratio: 1.285766
+# Mean Sharpe Ratio: 13.120860
 
 
+#b accuracy 
+in_sample_sharpe_ratio(svc_GS_gs)
+# IS Best Score Sharpe Ratio: 4.153074
+# Best IS Sharpe ratio: 4.153074
+# Lowest IS Sharpe Ratio: 0.881693
+# Mean Sharpe Ratio: 1.033248
 
+#c neg_log_loss得到的结果更好，更稳定。这是为啥呢？
 
 '''
  9.4 From exercise 2,
@@ -3632,15 +3655,37 @@ best_params =svc_model.named_steps['svc'].get_params()
  (c) What scoring method leads to higher (in-sample) Sharpe ratio?
  '''
 
+# a neg_log_loss
+in_sample_sharpe_ratio(svc_RS_gs)
+# IS Best Score Sharpe Ratio: 6.121556
+# Best IS Sharpe ratio: 19.323110
+# Lowest IS Sharpe Ratio: 1.344132
+# Mean Sharpe Ratio: 11.597977
+
+#b accuracy 
+in_sample_sharpe_ratio(svc_RS_gs)
+# IS Best Score Sharpe Ratio: 0.881693
+# Best IS Sharpe ratio: 0.881693
+# Lowest IS Sharpe Ratio: 0.881693
+# Mean Sharpe Ratio: 0.881693
+
+#c neg_log_loss得到的结果更好，更稳定。
+
+
+
+
 
 
 '''
  9.5 Read the definition of log loss, L[Y,P].
- (a) Whyisthescoring function neg_log_lossdefined asthe negative log loss,
+ (a) Why is the scoring function neg_log_loss defined as the negative log loss,
  −L[Y,P]?
  (b) What would be the outcome of maximizing the log loss, rather than the neg
 ative log loss?
 '''
+#(a) 因为sklearn的超参优化函数都是最大化评分函数，所以为了最小化log_loss，需要取负值，使得最小化log_loss等价于最大化-neg_log_loss。
+
+# 最大化negative log loss 改为最大化log loss会导致模型故意学坏
 
 
 '''
@@ -3650,20 +3695,8 @@ cast’s confidence. In this case, what is a more appropriate scoring function f
 '''
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#准确率比较合适，不管置信度高低，反正每次下注都一样。只考虑这次的信息是否正确。F1-score 也是考虑的一个方向，发出的信号可能是不平衡的，所以F1-score 更好。
+#进一步，对于这样的等额下注，可以自定义 scorer：score = mean(returns[y_pred == y_true] - returns[y_pred != y_true])  关注长期期望收益
 
 
 
@@ -3676,5 +3709,23 @@ cast’s confidence. In this case, what is a more appropriate scoring function f
 4.对于meta-labeling时可以使用f1或者accuracy进行评分,meta-labeling标签已代表“经济结果”,是直接决策做还是不做，无需概率校准，而且不是使用在主模型上的。所以仅有这个例外。
 '''
 
+
+
+#%%
+
+#第十章 下注大小  根据机器学习结果调整下注的大小
+
+
+
+
+
+
+
+
+'''
+第十章总结：
+1.
+
+'''
 
 
