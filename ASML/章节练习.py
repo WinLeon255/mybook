@@ -3715,7 +3715,196 @@ cast’s confidence. In this case, what is a more appropriate scoring function f
 
 #第十章 下注大小  根据机器学习结果调整下注的大小
 
+from scipy.stats import norm
 
+def getSignal(events, stepSize, prob, pred, numClasses, numThreads, **kargs):
+
+    '''
+    注：
+    1.由于使用了t-value of OvR，所以一个潜在的前提是假设每个类别的概率是相等的，即所有类别的先验概率都是1/numClasses。 所以输入的分类是要基本平衡的。如果分类不均衡，比如一个类别的概率是0.9，另一个类别的概率是0.1，那么这个类别的信号会被放大，而另一个类别的信号会被缩小。导致对小类别的信号下注变少，减少了recall率，从而降低盈利。   当然经过主模型事件式处理后是接近于均衡的——若使用RF/XGB，必须显式加 CalibratedClassifierCV(..., method='isotonic')能够减少不平衡？未验证
+    '''
+
+    # Get signals from predictions
+    if prob.shape[0] == 0:
+        return pd.Series()
+    # 1) Generate signals from multinomial classification (one-vs-rest, OvR)
+    signal0 = (prob - 1. / numClasses) / (prob * (1. - prob)) ** 0.5  # t-value of OvR 预测概率转换为标准正态置信度分布的分位数
+    signal0 = pred * (2 * norm.cdf(signal0) - 1)  # Signal = side * size  转为[0,1]的信号，方向看pred
+
+    if 'side' in events:
+        signal0 *= events.loc[signal0.index, 'side']  # Meta-labeling
+    # 2) Compute average signal among those concurrently open
+    df0 = signal0.to_frame('signal').join(events[['t1']], how='left')
+    df0 = avgActiveSignals(df0, numThreads)  # 计算每个事件起始时间点上投注的平均值
+
+    signal1 = discreteSignal(signal0=df0, stepSize=stepSize) # 离散化信号，将连续信号转换为离散信号。减少平均化导致的小额交易，得平均投注额增长到一定额度再执行交易
+    return signal1
+
+def avgActiveSignals(signals, numThreads):
+    # compute the average signal among those active
+    # 1) time points where signals change (either one starts or one ends)
+    tPnts = set(signals['t1'].dropna().values)
+    tPnts = tPnts.union(signals.index.values)
+    
+    # Convert set to a sorted list
+    tPnts = list(tPnts)
+    tPnts.sort()
+
+    out = mpPandasObj(mpAvgActiveSignals, ('molecule', tPnts), numThreads, signals=signals)
+    
+    return out
+
+def mpAvgActiveSignals(signals, molecule):
+    '''
+    At time loc, average signal among those still active.
+
+    '''
+    
+    out = pd.Series(dtype=float)  # 创建一个空的 Series，用于存储结果
+
+    for loc in molecule:
+        # 筛选出在 loc 时间点上仍然活跃的信号
+        df0 = (signals.index.values <= loc) & ((loc < signals['t1']) | pd.isnull(signals['t1']))
+        
+        act = signals[df0].index  # 获取活跃信号的索引
+
+        if len(act) > 0:
+            # 如果有活跃信号，计算它们的平均值
+            out[loc] = signals.loc[act, 'signal'].mean()
+        else:
+            # 如果没有活跃信号，设置为 0
+            out[loc] = 0
+    
+    return out
+
+def discreteSignal(signal0, stepSize):
+    """
+    离散化下注信号，将连续信号转换为离散信号。减少平均化导致的小额交易，得平均投注额增长到一定额度再执行交易。
+    
+    Parameters:
+    signal0 : array-like
+        The input signal to be discretized.
+    stepSize : float
+        The size of the steps for discretization.  # 离散化的步长 0.2，0.3这样的步长
+
+    Returns:
+    np.ndarray
+        The discretized signal capped between -1 and 1.
+    """
+    
+    # Discretize the signal by rounding to the nearest stepSize
+    signal1 = (signal0 / stepSize).round() * stepSize  # Discretize
+    signal1[signal1 > 1] = 1  # Cap values above 1
+    signal1[signal1 < -1] = -1  # Floor values below -1
+    
+    return signal1
+
+
+'''
+10.1 Using the formulation in Section 10.3, plot the bet size (m) as a function of the
+maximum predicted probability (̃p) when ‖X‖ = 2,3,…,10.
+'''
+import matplotlib.pyplot as plt
+#画出getSignal 参数numClasses= 2,3,…,10.时的# 1 单事件(bet size)
+
+#构建数据
+n_samples = 10000
+min_prob = 1e-3 #by right we should used [-1,0], but to avoid -inf and error msg we use something else
+max_prob = 1.
+class_labels = np.arange(2,11)
+steps = [0.01, 0.05, 0.1]
+
+def make_randomt1_data(n_samples: int =10000, max_days: float = 5., Bdate: bool = True):
+    # generate a random dataset for a classification problem
+    if Bdate:
+        _freq = pd.tseries.offsets.BDay()
+    else:
+        _freq = 'D'
+    _today = dt.datetime.today()
+    df0 = pd.date_range(periods=n_samples, freq=_freq, end=_today)
+    rand_days = np.random.uniform(1, max_days, n_samples)
+    rand_days = pd.Series([dt.timedelta(days = d) for d in rand_days], index = df0)
+    df1 = df0 + pd.to_timedelta(rand_days, unit='d')
+    df1.sort_values(inplace=True)
+    X = pd.Series(df1, index = df0, name='t1').to_frame()
+    return X
+
+X =  make_randomt1_data(n_samples=n_samples,
+                           max_days = 25.,
+                           Bdate = False) # True = business days only
+
+
+X["prob"] = np.linspace(start = min_prob, 
+                            stop = max_prob,
+                            num = n_samples,
+                            endpoint = False)
+
+plt.figure(figsize=(12,8))
+for cls in class_labels:
+    
+    X["Z_score"] = X["prob"].apply(lambda prob: (prob - 1/cls) / (prob * (1 - prob))**0.5)
+    X["bet_size_prob"] = X.apply(
+    lambda z: (2 * norm.cdf(z["Z_score"]) - 1) , # 转换为[-1,1]的信号
+    axis=1
+)
+#     X["bet_size_prob2"] = X.apply(
+#     lambda z: (2 * norm.cdf(z["Z_score"]) - 1) * (1 if (z['Z_score'] > 0) else -1),
+#     axis=1
+# )
+    plt.plot(X["prob"],X["bet_size_prob"], label=f"||X||={cls}", linewidth=2, alpha=1)
+    
+plt.ylim(-1, 1)
+plt.xlim(0, 1) 
+plt.axhline(y=0, c='r',ls='--')
+plt.axvline(x=0.1, c='r',ls='--') # predict prob = 0.1
+plt.axvline(x=0.33, c='r',ls='--') 
+plt.axvline(x=0.5, c='r',ls='--') # predict prob = 0.5
+plt.ylabel("Bet Size $m=2Z[z]-1$")
+plt.xlabel(r"Maximum Predicted Probability $\tilde{p}=max_i${$p_i$}")
+plt.title("Bet Size vs. Maximum Predicted Probability")
+plt.legend(title="Number of bet size labels")
+plt.show()
+
+
+# signal0 = (prob - 1. / numClasses) / (prob * (1. - prob)) ** 0.5  # t-value of OvR
+# signal0 = pred * (2 * norm.cdf(signal0) - 1)  # Signal = side * size
+
+
+
+'''
+10.2 Draw 10,000 random numbers from a uniform distribution with bounds
+U[.5,1.].
+(a) Compute the bet sizes m for ‖X‖ = 2.
+(b) Assign 10,000 consecutive calendar days to the bet sizes.
+(c) Draw 10,000 random numbers from a uniform distribution with bounds
+U[1,25].
+(d) Form a pandas series indexed by the dates in 2.b, and with values equal
+to the index shifted forward the number of days in 2.c. This is a t1 object
+similar to the ones we used in Chapter 3.
+(e) Compute the resulting average active bets, following Section 10.4.
+'''
+#a
+lower_bound = 0.5
+upper_bound = 1.
+num_samples = 10000
+random_numbers = np.random.uniform(lower_bound, upper_bound, num_samples)
+Z_scores = (random_numbers - 1/2) / np.sqrt(random_numbers * (1 - random_numbers))
+bet_size = (2 * norm.cdf(Z_scores) - 1)
+#b
+start_date = dt.datetime.today()
+end_date = start_date + dt.timedelta(days=10000-1)
+dates = pd.date_range(start=start_date, end=end_date, freq='D')
+X = pd.Series(bet_size, index=dates).to_frame(name='signal')
+
+#c#d
+rand_days = np.random.uniform(1, 25, num_samples)
+rand_days = pd.Series([dt.timedelta(days = d) for d in rand_days], index = dates)
+t1 = dates + pd.to_timedelta(rand_days, unit='d')
+
+#e
+X['t1'] = t1
+
+avg_bet_size =avgActiveSignals(X, 5)
 
 
 
@@ -3723,8 +3912,72 @@ cast’s confidence. In this case, what is a more appropriate scoring function f
 
 
 '''
+10.3 Using the t1 object from exercise 2.d:
+(a) Determine the maximum number of concurrent long bets, ̄cl.
+(b) Determine the maximum number of concurrent short bets, ̄cs.
+(c) Derive the bet size as mt = ct,l 
+1
+̄cl 
+− ct,s 
+1
+̄cs
+, where ct,l is the number of con
+current long bets at time t, and ct,s is the number of concurrent short bets at
+time t.
+BIBLIOGRAPHY
+149
+'''
+
+'''
+10.4 Using the t1 object from exercise 2.d:
+(a) Compute the series ct = ct,l − ct,s, where ct,l is the number of concurrent
+long bets at time t, and ct,s is the number of concurrent short bets at time t.
+(b) Fit a mixture of two Gaussians on {ct}. You may want to use the method
+described in L´opez de Prado and Foreman [2014].
+⎧
+(c) Derive the bet size as mt =
+⎪
+⎨
+⎪
+⎩
+F[ct]−F[0]
+1−F[0]
+F[ct]−F[0]
+F[0]
+if ct ≥ 0
+if ct < 0
+, where F[x] is the CDF
+of the fitted mixture of two Gaussians for a value x.
+(d) Explain how this series {mt} differ from the bet size series computed in
+exercise 3.
+
+'''
+
+
+'''
+10.5 Repeat exercise 1, where you discretize m with a stepSize=.01,
+stepSize=.05, and stepSize=.1.
+'''
+
+'''
+10.6 Rewrite the equations in Section 10.6, so that the bet size is determined by a
+power function rather than a sigmoid function.
+'''
+
+'''
+10.7 Modify Snippet 10.4 so that it implements the equations you derived in exer
+cise 6.
+
+
+
+
+'''
+
+'''
 第十章总结：
-1.
+1.根据模型预测置信度调整下注大小。
+2.（深入）已经下注的订单根据模型预测与市场价格动态调整下注额和确定下单限价。.
+3. 注 使用了norm.cdf(signal0) 但是咩有要求数据是正态分布，这里只是映射到【-1,1】范围使用。只是作为归一化工具
 
 '''
 
