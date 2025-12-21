@@ -3757,7 +3757,7 @@ def avgActiveSignals(signals, numThreads):
 def mpAvgActiveSignals(signals, molecule):
     '''
     At time loc, average signal among those still active.
-
+    在时间重叠的事件中，将重叠部分的信号进行平均。直到事件结束。
     '''
     
     out = pd.Series(dtype=float)  # 创建一个空的 Series，用于存储结果
@@ -3884,18 +3884,20 @@ similar to the ones we used in Chapter 3.
 (e) Compute the resulting average active bets, following Section 10.4.
 '''
 #a
-lower_bound = 0.5
+lower_bound = 0
 upper_bound = 1.
 num_samples = 10000
-random_numbers = np.random.uniform(lower_bound, upper_bound, num_samples)
-Z_scores = (random_numbers - 1/2) / np.sqrt(random_numbers * (1 - random_numbers))
+prob = np.random.uniform(lower_bound, upper_bound, num_samples)
+pred= np.where(prob > 0.5, 1, -1)
+Z_scores = (prob - 1/2) / np.sqrt(prob * (1 - prob))
 bet_size = (2 * norm.cdf(Z_scores) - 1)
 #b
 start_date = dt.datetime.today()
 end_date = start_date + dt.timedelta(days=10000-1)
 dates = pd.date_range(start=start_date, end=end_date, freq='D')
 X = pd.Series(bet_size, index=dates).to_frame(name='signal')
-
+X['prob']=prob
+X['pred']=pred
 #c#d
 rand_days = np.random.uniform(1, 25, num_samples)
 rand_days = pd.Series([dt.timedelta(days = d) for d in rand_days], index = dates)
@@ -3905,8 +3907,12 @@ t1 = dates + pd.to_timedelta(rand_days, unit='d')
 X['t1'] = t1
 
 avg_bet_size =avgActiveSignals(X, 5)
+avg_bet_size=avg_bet_size.to_frame(name='avg_bet_size')
+
+avg_bet_size=avg_bet_size.merge(X, left_index=True, right_index=True,how='left')
 
 
+# avg_bet_size.to_excel(r'D:\Git\book\avg_bet_size.xlsx')
 
 
 
@@ -3915,18 +3921,77 @@ avg_bet_size =avgActiveSignals(X, 5)
 10.3 Using the t1 object from exercise 2.d:
 (a) Determine the maximum number of concurrent long bets, ̄cl.
 (b) Determine the maximum number of concurrent short bets, ̄cs.
-(c) Derive the bet size as mt = ct,l 
-1
-̄cl 
-− ct,s 
-1
-̄cs
-, where ct,l is the number of con
+(c) Derive the bet size as mt = ct,l*1̄/cl − ct,s ̄*1/cs, where ct,l is the number of con
 current long bets at time t, and ct,s is the number of concurrent short bets at
 time t.
-BIBLIOGRAPHY
-149
 '''
+#a 确定最大的并发多头
+longs = X[X['pred'] == 1].copy()	
+long_events = []
+for idx, row in longs.iterrows():
+    t0 = idx
+    t1 = row['t1']
+    if t0 <= t1:  # 防止无效区间
+        long_events.append((t0, +1))
+        long_events.append((t1, -1))
+
+# 排序事件，按时间顺序
+long_events.sort(key=lambda x: (x[0], x[1]))
+
+# 初始化并发多头和短头计数
+ct_l = 0
+max_ct_l = 0
+
+for t, delta in long_events:
+    ct_l += delta
+    max_ct_l = max(max_ct_l, ct_l)
+
+print(f"最大并发多头数: {max_ct_l}")
+
+#b 确定最大的并发空头
+shorts = X[X['pred'] == -1].copy()	
+short_events = []
+for idx, row in shorts.iterrows():
+    t0 = idx
+    t1 = row['t1']
+    if t0 <= t1:  # 防止无效区间
+        short_events.append((t0, +1))
+        short_events.append((t1, -1))
+
+# 排序事件，按时间顺序
+short_events.sort(key=lambda x: (x[0], x[1]))
+
+ct_s = 0
+max_ct_s = 0
+
+for t, delta in short_events:
+    ct_s += delta
+    max_ct_s = max(max_ct_s, ct_s)
+
+print(f"最大并发空头数: {max_ct_s}")
+
+#c 修改下注大小等于 ct,l*1̄/max_ct_l − ct,s ̄*1/max_ct_s
+#将每个时间点的多空头计算写到X的列
+X['ct_l'] = 0
+for t, delta in long_events:
+    X.loc[t:, 'ct_l'] += delta
+
+
+X['ct_s'] = 0
+for t, delta in short_events:
+    X.loc[t:, 'ct_s'] += delta
+
+
+
+#计算ct,l*1̄/max_ct_l − ct,s ̄*1/max_ct_s 作为下注大小   
+# ##  这里的下注大小是根据并发多头和空头数量计算得到的，不是根据模型预测置信度计算得到的。
+X['bet_size'] = X['ct_l']*1/max_ct_l - X['ct_s']*1/max_ct_s
+
+
+
+
+
+
 
 '''
 10.4 Using the t1 object from exercise 2.d:
@@ -3934,24 +3999,124 @@ BIBLIOGRAPHY
 long bets at time t, and ct,s is the number of concurrent short bets at time t.
 (b) Fit a mixture of two Gaussians on {ct}. You may want to use the method
 described in L´opez de Prado and Foreman [2014].
-⎧
-(c) Derive the bet size as mt =
-⎪
-⎨
-⎪
-⎩
-F[ct]−F[0]
-1−F[0]
-F[ct]−F[0]
-F[0]
-if ct ≥ 0
-if ct < 0
-, where F[x] is the CDF
-of the fitted mixture of two Gaussians for a value x.
+
+(c) Derive the bet size as mt = if ct ≥ 0, then
+(F[ct]−F[0])
+/(1−F[0])
+, else
+(F[ct]−F[0])/F[0]
+, where F[x] is the CDF of the fitted mixture of two Gaussians for a value x.
 (d) Explain how this series {mt} differ from the bet size series computed in
 exercise 3.
 
 '''
+#a 计算并发多头和空头数量的差值
+X['ct'] = X['ct_l'] - X['ct_s']
+
+#b 拟合双高斯混合模型
+#| 核心思想 | ct 值并非来自单一随机过程，而是由两个隐藏状态（latent regimes）交替生成，如 “震荡盘整、均值回归”态， “上涨趋势、动量强化”态
+from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
+ct = X['ct'].dropna().values.reshape(-1, 1)  # shape: (n_samples, 1)
+scaler = StandardScaler()
+ct_scaled = scaler.fit_transform(ct)
+
+gmm = GaussianMixture(
+    n_components=2,
+    covariance_type='full',   # 允许每个高斯有独立方差（推荐）
+    random_state=42,         # 可复现
+    max_iter=100,
+    tol=1e-4
+)
+gmm.fit(ct_scaled)
+
+# --- Step 5: 计算后验概率 P(state=k | ct) ---
+posterior = gmm.predict_proba(ct_scaled)  # shape: (n, 2)
+
+# --- Step 6: 还原高斯参数到原始 ct 尺度（关键！）---
+# 均值还原：μ_orig = μ_scaled * σ_ct + μ_ct
+mu_ct = X['ct'].mean()
+std_ct = X['ct'].std()
+means_orig = scaler.inverse_transform(gmm.means_.reshape(-1, 1)).flatten()
+# 方差还原：Var_orig = Var_scaled * σ_ct²
+covs_orig = gmm.covariances_.flatten() * (std_ct ** 2)
+stds_orig = np.sqrt(covs_orig)
+
+# --- Step 7: 将结果写回 X（严格对齐索引）---
+valid_idx = X['ct'].dropna().index
+X.loc[valid_idx, 'ct_gmm_prob_state1'] = posterior[:, 0]  # P(state 1 | ct)  状态1的后验概率
+X.loc[valid_idx, 'ct_gmm_prob_state2'] = posterior[:, 1]  # P(state 2 | ct)  状态2的后验概率
+X.loc[valid_idx, 'ct_gmm_state'] = np.argmax(posterior, axis=1) + 1  # 1 or 2 #模型预测处于状态
+
+# --- Step 8: 打印解读性结果 ---
+weights = gmm.weights_
+means = means_orig
+stds = stds_orig
+
+print("🔍 GMM Fitted on Net Concurrent Exposure ct = ct_l - ct_s:")
+print(f"   State 1 weight: {weights[0]:.3f}  → likely 'neutral/low-exposure' regime")
+print(f"   State 2 weight: {weights[1]:.3f}  → likely 'high-exposure' regime (trendy)")
+print(f"   State 1 mean:   {means[0]:+.4f}  (std = {stds[0]:.4f})")
+print(f"   State 2 mean:   {means[1]:+.4f}  (std = {stds[1]:.4f})")
+
+#结果及解释
+'''
+GMM Fitted on Net Concurrent Exposure ct = ct_l - ct_s:
+   State 1 weight: 0.697  → likely 'neutral/low-exposure' regime
+   State 2 weight: 0.303  → likely 'high-exposure' regime (trendy)
+   State 1 mean:   +1.1495  (std = 3.0457)
+   State 2 mean:   -2.9973  (std = 2.9976)
+
+State 1（70%，μ₁ ≈ +1.15）→ “温和多头主导的平衡市” 市场缓慢爬升，多头信号零星触发、空头极少
+std=3.0 很大 → State 1 内部变化剧烈：可能从 ct=−3（强空）到 ct=+5（强多）都属于它；
+不能简单认为 State 1 = “安全区” —— 它是主流量，但包含大量噪声和假突破。
+
+State 2（30%，μ₂ ≈ −3.00）→ “强空头主导的趋势市” 市场快速下降，空头信号频繁触发、多头极少
+虽只占 30% 时间，但这是 高信息量、高确定性的趋势段
+
+#然后就可以对不同状态的市场采取不同的下注策略
+
+此外，还可以对市场切分为均值回归和趋势两种市场状态等等，或者两两交叉为4种状态，高斯混合模型还是有点东西的。
+
+'''
+
+# X.to_excel(r'D:\Git\book\X_with_gmm_ct.xlsx')
+
+
+#c 计算下注大小
+def F(x):
+    """
+    Cumulative Distribution Function (CDF) of the fitted 2-Gaussian Mixture.
+    
+    Parameters:
+    -----------
+    x : float or array-like
+        Point(s) at which to evaluate the CDF.
+    
+    Returns:
+    --------
+    float or np.ndarray : F(x) = P(ct <= x)
+    """
+    x = np.asarray(x)
+    # 对每个高斯成分计算 Φ((x - μ)/σ)，再加权求和
+    cdf1 = norm.cdf(x, loc=means[0], scale=stds[0])
+    cdf2 = norm.cdf(x, loc=means[1], scale=stds[1])
+    return weights[0] * cdf1 + weights[1] * cdf2
+
+
+
+X['mt'] = np.where(
+    X['ct'] >= 0,
+     (F(X['ct']) - F(0)) / (1 - F(0)),
+    (F(X['ct']) - F(0)) / F(0)
+)
+
+
+#d
+#评价：10.3的bet_size 大多时间都是在0附近，只有极端值时才会有较大的下注大小。
+#10.4的mt下注更加贴近ct的状态，即市场的两种状态。下注更为灵敏，而且不会只局限在0附近，更好。
+#但是都是依赖于市场状态判断，而不是对于模型预测置信度，直接的依赖于市场判断的正确性pred。更适合对指数进行判断，而不是对个股进行判断。从这个角度看，课本的betsize计算方式更好
+
 
 
 '''
@@ -3959,26 +4124,92 @@ exercise 3.
 stepSize=.05, and stepSize=.1.
 '''
 
+#构建数据
+n_samples = 10000
+min_prob = 1e-3 #by right we should used [-1,0], but to avoid -inf and error msg we use something else
+max_prob = 1.
+class_labels = np.arange(2,11)
+steps = [0.01, 0.05, 0.1]
+
+X =  make_randomt1_data(n_samples=n_samples,
+                           max_days = 25.,
+                           Bdate = False) # True = business days only
+
+
+X["prob"] = np.linspace(start = min_prob, 
+                            stop = max_prob,
+                            num = n_samples,
+                            endpoint = False)
+
+for step in steps:
+    plt.figure(figsize=(12,8))
+    for cls in class_labels:
+        
+        X["Z_score"] = X["prob"].apply(lambda prob: (prob - 1/cls) / (prob * (1 - prob))**0.5)
+        X["bet_size_prob"] = X.apply(
+        lambda z: (2 * norm.cdf(z["Z_score"]) - 1) , # 转换为[-1,1]的信号
+        axis=1
+    )
+        X['bet_size_step'] = discreteSignal(X["bet_size_prob"], step)
+        plt.plot(X["prob"],X["bet_size_step"], label=f"||X||={cls}", linewidth=2, alpha=0.5)
+
+        
+    plt.ylim(-1, 1)
+    plt.xlim(0, 1) 
+    plt.axhline(y=0, c='r',ls='--')
+    plt.axvline(x=0.1, c='r',ls='--') # predict prob = 0.1
+    plt.axvline(x=0.33, c='r',ls='--') 
+    plt.axvline(x=0.5, c='r',ls='--') # predict prob = 0.5
+    plt.ylabel("Bet Size $m=2Z[z]-1$")
+    plt.xlabel(r"Maximum Predicted Probability $\tilde{p}=max_i${$p_i$}")
+    plt.title(f"Bet Size vs. Maximum Predicted Probability，stepSize={step}")
+    plt.legend(title="Number of bet size labels")
+    plt.show()
+
+#随着stepSize的增加，bet_size的变化更加缓慢，在一定范围内变化时不执行交易，只在变化超过stepSize时才执行交易。减少手续费的风险,降低交易频率。
+
+
+
 '''
 10.6 Rewrite the equations in Section 10.6, so that the bet size is determined by a
 power function rather than a sigmoid function.
 '''
 
-'''
-10.7 Modify Snippet 10.4 so that it implements the equations you derived in exer
-cise 6.
-
-
 
 
 '''
+10.7 Modify Snippet 10.4 so that it implements the equations you derived in exercise 6.
+
+'''
+
+
+
+
 
 '''
 第十章总结：
 1.根据模型预测置信度调整下注大小。
 2.（深入）已经下注的订单根据模型预测与市场价格动态调整下注额和确定下单限价。.
 3. 注 使用了norm.cdf(signal0) 但是咩有要求数据是正态分布，这里只是映射到【-1,1】范围使用。只是作为归一化工具
-
+4.可以使用高斯混合模型来对市场状态进行切分，从而更好的判断市场状态。比如切分为震荡市和趋势市，再使用高斯混合模型判断市场。
+5. 10.6和10.7内容是动态调整下注大小的，即不要固定仓位，而是根据模型预测置信度动态调整仓位。改为幂函数效果见FIGURE10.3 。可是模型怎么对同一事件进行持续预测呢？而且预测是的价格才好动态调整。这部分属于进阶内容了，暂时不展开。先使用与事件相关的betsize调整吧。（伪动态调整）
 '''
 
 
+#%%
+
+#第十一章 回测的危险
+
+
+
+
+
+
+
+
+'''
+第十一章总结：
+
+
+
+'''
