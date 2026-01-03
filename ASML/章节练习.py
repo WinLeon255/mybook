@@ -4323,16 +4323,268 @@ quartile, and buy the long quartile. Performance is amazing. What’s the sin
 #%%
 
 #第十三章 在模拟数据回测
+from random import gauss
+from itertools import product
+
+#main()遍历了市场状态,然后batch（）是止盈止损，甚至是三重障碍的设置。因为不管是什么策略，都是用类似的止盈止损策略，比如2.5个标准差止盈止损之类的。而市场状态都是遍历了的，所以也不需要额外的设置了。
+#选择好这些预定的参数后，再通过百万次路径的模拟，展示出相应的夏普比率，然后计算出对应较优的止盈止损。
+def batch(coeffs, nIter=1e5, maxHP=100, rPT=np.linspace(0.5, 10, 20), rSLm=np.linspace(0.5, 10, 20), seed=0):
+    """
+    在合成的均值回归过程中模拟交易。
+
+    参数:
+    -----------
+    coeffs : dict, 包含 'forecast' (长期趋势), 'hl' (半衰期), 'sigma' (连续时间的噪声标准差σ，而不仅仅是残差标准差) 
+    nIter : int, 每个 (PT, SL) 参数对的蒙特卡洛模拟次数
+    maxHP : int, 最大持仓周期（步数），超过则强制平仓
+    rPT : array, 止盈阈值列表 (正值)  实际为1*噪声标准差，1.5*噪声标准差，2*噪声标准差等这样的假设
+    rSLm : array, 止损幅度列表 (正值，实际应用为 -rSLm) 实际为-1*噪声标准差，-1.5*噪声标准差，-2*噪声标准差等这样的假设
+    seed : float, 初始价格水平
+
+    返回:
+    --------
+    列表，每个元素为元组 (PT, SL, 平均盈亏, 盈亏标准差, 夏普比率)
+    """
+    # 计算 AR(1) 过程的衰减因子 phi
+    # 公式：phi = 2^(-1/hl)，hl 是半衰期
+    # 这决定了价格向长期趋势增长的速度
+    phi = 2 ** (-1.0 / coeffs['hl'])
+    
+    # 存储最终结果的列表
+    output1 = []
+
+    # 遍历所有止盈 (PT) 和止损 (SL) 的组合
+    for comb_ in product(rPT, rSLm):
+        # 存储当前 (PT, SL) 组合下，所有模拟的盈亏结果
+        output2 = []
+        
+        # 进行 nIter 次蒙特卡洛模拟
+        for iter_ in range(int(nIter)):
+            # 初始化当前价格 p 为 seed (即入场价)
+            p = seed
+            # 持仓周期计数器
+            hp = 0
+            
+            # 进入一个交易循环，直到满足退出条件
+            while True:
+                # 更新价格 p，使用 AR(1) 均值回归模型
+                # p_{t} = (1-phi) * forecast + phi * p_{t-1} + sigma * 高斯噪声
+                # 这个模型模拟了价格围绕 'forecast' 值长期趋势增长的特性
+                p = (1 - phi) * coeffs['forecast'] + phi * p + coeffs['sigma'] * gauss(0, 1)
+                
+                # 计算当前盈亏 (cP)：当前价格 - 入场价 (seed)
+                cP = p - seed
+                # 持仓周期加一
+                hp += 1
+
+                # 检查退出条件：
+                # 1. 达到止盈：cP >= PT
+                # 2. 触发止损：cP <= -SL
+                # 3. 超过最大持仓周期：hp > maxHP
+                if cP >= comb_[0] or cP <= -comb_[1] or hp > maxHP:
+                    # 将本次模拟的最终盈亏结果存入 output2
+                    output2.append(cP)
+                    # 跳出本次交易循环，开始下一次模拟
+                    break
+
+        # 计算当前 (PT, SL) 组合下，nIter 次模拟的统计结果
+        mean_pnl = np.mean(output2)  # 平均盈亏
+        std_pnl = np.std(output2)    # 盈亏标准差 (风险)
+        # 夏普比率：单位风险的收益 (注意处理 std 为 0 的情况)
+        sharpe_ratio = mean_pnl / std_pnl if std_pnl != 0 else 0.0
+
+        # 打印当前参数组合的统计结果 (Python 3 需要 print() 函数)
+        print(f"PT={comb_[0]:.2f}, SL={comb_[1]:.2f} | Mean={mean_pnl:.4f}, Std={std_pnl:.4f}, Sharpe={sharpe_ratio:.4f}")
+        
+        # 将当前 (PT, SL) 组合的结果元组添加到总结果列表中
+        output1.append((comb_[0], comb_[1], mean_pnl, std_pnl, sharpe_ratio))
+
+    # 返回所有 (PT, SL) 组合的统计结果列表
+    return output1
 
 
+def main():
+    """
+    主函数：遍历不同的市场参数 (forecast, hl)，对每个参数组合运行 batch 模拟
+
+    """
+    # 定义止盈和止损的搜索范围 (0 到 10，共 21 个点)
+    rPT = rSLm = np.linspace(0, 10, 21)
+    
+    # 计数器，用于跟踪当前运行的是第几组参数
+    count = 0
+    all_outputs=[]
+    
+    # 遍历预测值 (forecast) 和半衰期 (hl) 的组合
+    for forecast in [10, 5, 0, -5, -10]:
+        for hl in [5, 10, 25, 50, 100]:
+            count += 1
+            # 构建当前参数字典
+            coeffs = {'forecast': forecast, 'hl': hl, 'sigma': 1}
+            
+            print(f"\n--- 运行第 {count} 次: forecast={forecast}, hl={hl} ---")
+            
+            # 调用 batch 函数进行模拟
+            # 注意：原代码中返回的 output 在循环内被覆盖，最后只返回最后一次的结果
+            # 如果想保留所有结果，应将 output 添加到一个列表中
+            output = batch(
+                coeffs=coeffs,
+                nIter=1e5,  # 模拟次数
+                maxHP=100,  # 最大持仓周期
+                rPT=rPT,    # 止盈范围
+                rSLm=rSLm,  # 止损范围
+                seed=0      # 初始价格
+            )
+            # 如果需要保留所有结果，可以这样修改：
+            all_outputs.append((forecast, hl, output))
+    
+    # 原代码返回最后一次 batch 的结果
+    return all_outputs
+
+#根据价格序列估计 OU 过程的参数，即计算 'forecast' (长期趋势), 'hl' (半衰期), 'sigma'
+#还有额外的方法：'yule_walker' : Yule-Walker 方法（对噪声更稳健），'mle' : 最大似然估计
+#注意有个前提是价格序列是平稳的，否则估计的参数可能不准确，需要经过adf检验，判断是否平稳，对于股票价格，通常使用对数价格
+def estimate_ou_parameters(price_series, dt=1/252, return_details=False):
+    """
+    估计离散型 Ornstein-Uhlenbeck 过程参数
+    
+    参数:
+    -----------
+    price_series : array-like
+        价格序列，可以是 list, numpy array 或 pandas Series
+    dt : float
+        时间间隔（以年为单位）。默认 1/252 表示交易日
+    return_details : bool
+        是否返回详细统计结果
+    
+    返回:
+    -----------
+    dict: 包含以下键值:
+        'forecast' : 长期均衡价格 (mu)
+        'hl' : 半衰期（年）
+        'sigma' : 连续 O-U 过程的波动率参数（年化）
+        'beta_0', 'beta_1' : AR(1) 回归系数
+        'theta' : 均值回归速度
+        'residual_std' : 残差标准差
+    """
+    
+    # 转换为 numpy 数组
+    prices = np.array(price_series).flatten()
+    
+    if len(prices) < 10:
+        raise ValueError("数据点太少，无法进行可靠估计")
+    
+    # 创建滞后序列
+    P_t = prices[1:]      # 当前期
+    P_t_1 = prices[:-1]   # 滞后一期
+    
+    # 执行 AR(1) 回归: P_t = beta_0 + beta_1 * P_{t-1} + epsilon
+    # 添加常数项
+    X = sm.add_constant(P_t_1)
+    model = sm.OLS(P_t, X)
+    results = model.fit()
+    
+    beta_0 = results.params[0]
+    beta_1 = results.params[1]
+    residual_std = np.std(results.resid)  # 残差标准差
+    
+    # 检查平稳性条件
+    if beta_1 >= 1:
+        print(f"警告: beta_1={beta_1:.4f} >= 1，过程可能非平稳")
+        # 可以限制 beta_1 在合理范围
+        beta_1 = min(0.999, beta_1)
+    
+    # 1. 计算长期均衡价格 (forecast)
+    mu = beta_0 / (1 - beta_1)
+    
+    # 2. 计算半衰期
+    # 连续时间均值回归速度: theta = -ln(beta_1)/dt
+    theta = -np.log(beta_1) / dt
+    hl = np.log(2) / theta  # 以年为单位
+    
+    # 3. 计算连续 O-U 过程的 sigma（年化）
+    # 公式: sigma = sigma_epsilon * sqrt(2*theta/(1-exp(-2*theta*dt)))
+    # 这里 sigma_epsilon 是残差的标准差
+    sigma_epsilon = residual_std
+    exponent = -2 * theta * dt
+    sigma = sigma_epsilon * np.sqrt(2 * theta / (1 - np.exp(exponent)))
+    
+    # 整理结果
+    result = {
+        'forecast': mu,
+        'hl': hl,
+        'sigma': sigma,
+        'beta_0': beta_0,
+        'beta_1': beta_1,
+        'theta': theta,
+        'residual_std': residual_std,
+        'r_squared': results.rsquared,
+        't_stat_beta_1': results.tvalues[1]
+    }
+    
+    if return_details:
+        # 添加更多统计信息
+        result['regression_results'] = results
+        result['residuals'] = results.resid
+        result['fitted_values'] = results.fittedvalues
+    
+    return result
 
 
+'''
+13.1 Suppose you are an execution trader. A client calls you with an order to cover a
+short position she entered at a price of 100. She gives you two exit conditions:
+profit-taking at 90 and stop-loss at 105.
+(a) Assuming the client believes the price follows an O-U process, are these
+levels reasonable? For what parameters?
+(b) Can you think of an alternative stochastic process under which these levels
+make sense?
+'''
+
+'''
+13.2 Fit the time series of dollar bars of E-mini S&P 500 futures to an O-U process.
+Given those parameters:
+(a) Produce a heat-map of Sharpe ratios for various profit-taking and stop-loss
+levels.
+(b) What is the OTR?
+'''
+
+'''
+13.3 Repeat exercise 2, this time on a time series of dollar bars of
+(a) 10-year U.S. Treasure Notes futures
+(b) WTI Crude Oil futures
+(c) Are the results significantly different? Does this justify having execution
+traders specialized by product?
+'''
+
+'''
+13.4 Repeat exercise 2 after splitting the time series into two parts:
+(a) The first time series ends on 3/15/2009.
+(b) The second time series starts on 3/16/2009.
+(c) Are the OTRs significantly different?
+'''
+
+'''
+13.5 How long do you estimate it would take to derive OTRs on the 100 most liquid
+futures contracts worldwide? Considering the results from exercise 4, how often
+do youthink you mayhavetore-calibrate the OTRs? Does it make sense to pre
+compute this data?
+'''
 
 
+'''
+13.6 Parallelize Snippets 13.1 and 13.2 using the mpEngine module described in
+Chapter 20.
+
+'''
 
 
 '''
 第十三章总结：
 1.提出了如何根据原数据构建止盈止损条件。能够在数学上证明的，不是基于回测的。（回测不是研究手段，用回测实现止盈止损有很大的过拟合嫌疑）。也就是能够使用在三重障碍法的上下障碍的止盈止损条件，类似。
+2.通过实验得到了对应市场状态（forecast（趋势值）, hl（半衰期））下的最优止盈止损条件。状态，只需要判断市场是什么样的市场和半衰期就可以根据本章的batch函数，得到最优的止盈止损条件。或者按照课本去对应出来已有的结果，也能出个大概。
+3.通过将价格平稳化后可以计算OU过程的参数，即长期均衡价格 (forecast)，半衰期 (hl)，连续 O-U 过程的波动率参数（年化） (sigma)。而且这就与前面数据处理的过程联系起来，要使得数据平稳，正态，才富有统计意义。
+
+
 
 '''
