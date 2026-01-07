@@ -4326,7 +4326,7 @@ quartile, and buy the long quartile. Performance is amazing. What’s the sin
 from random import gauss
 from itertools import product
 
-#main()遍历了市场状态,然后batch（）是止盈止损，甚至是三重障碍的设置。因为不管是什么策略，都是用类似的止盈止损策略，比如2.5个标准差止盈止损之类的。而市场状态都是遍历了的，所以也不需要额外的设置了。
+# main()遍历了市场状态,然后batch（）是止盈止损，甚至是三重障碍的设置。因为不管是什么策略，都是用类似的止盈止损策略，比如2.5个标准差止盈止损之类的。而市场状态都是遍历了的，所以也不需要额外的设置了。
 #选择好这些预定的参数后，再通过百万次路径的模拟，展示出相应的夏普比率，然后计算出对应较优的止盈止损。
 def batch(coeffs, nIter=1e5, maxHP=100, rPT=np.linspace(0.5, 10, 20), rSLm=np.linspace(0.5, 10, 20), seed=0):
     """
@@ -4443,7 +4443,7 @@ def main():
 
 #根据价格序列估计 OU 过程的参数，即计算 'forecast' (长期趋势), 'hl' (半衰期), 'sigma'
 #还有额外的方法：'yule_walker' : Yule-Walker 方法（对噪声更稳健），'mle' : 最大似然估计
-#注意有个前提是价格序列是平稳的，否则估计的参数可能不准确，需要经过adf检验，判断是否平稳，对于股票价格，通常使用对数价格
+#注意有个前提是价格序列是平稳的，否则估计的参数可能不准确，需要经过adf检验，判断是否平稳，对于股票价格，通常使用对数价格，因为价格p很难展示出长期趋势
 def estimate_ou_parameters(price_series, dt=1/252, return_details=False):
     """
     估计离散型 Ornstein-Uhlenbeck 过程参数
@@ -4532,22 +4532,71 @@ def estimate_ou_parameters(price_series, dt=1/252, return_details=False):
 
 
 '''
-13.1 Suppose you are an execution trader. A client calls you with an order to cover a
-short position she entered at a price of 100. She gives you two exit conditions:
-profit-taking at 90 and stop-loss at 105.
-(a) Assuming the client believes the price follows an O-U process, are these
-levels reasonable? For what parameters?
-(b) Can you think of an alternative stochastic process under which these levels
-make sense?
+13.1 Suppose you are an execution trader. A client calls you with an order to cover a short position she entered at a price of 100. She gives you two exit conditions: profit-taking at 90 and stop-loss at 105.
+(a) Assuming the client believes the price follows an O-U process, are these levels reasonable? For what parameters?
+(b) Can you think of an alternative stochastic process under which these levels make sense?
 '''
+
+#a 需要对价差 log(P1) - log(P2) 或 P1 - beta*P2 进行平稳性检验（adf test） ，如果检验通过了，才能对数据进行 OU 过程的参数估计，获取长期均衡价格、半衰期、波动率等参数。
+#假设已经是平稳的，这个退出条件不是最优的，因为这是高止盈低止损，大多数市场下都是高止损，中低止盈。不管长期均衡价格是正数，负数还是零。
+
+#客户认为价格是均值回归，而且长期均值价格要低于90，这样止盈才有意义。
+#均值回归速率 ，这决定了价格从 100 回归到 μ 的速度有多快————————这个是提高单位时间交易频率的好东西，揭示了等待的时间有多久。
+#波动率 σ ，形容价格的震荡幅度。在这里比较影响止损。所以回归的速度和这个随机震荡还不太一样。
+
+
+#b 其他适用于这样止盈止损的统计模型：
+#1. 几何布朗运动（GBM）+ 趋势 (Drift)：价格呈指数增长或下降趋势，但同时伴有随机波动。其动态由漂移率 μ （趋势）和波动率 决定。这样的统计模型就适用于单边上涨/下跌的行情，也可以按照这样的统计模型对止盈止损进行开发
+#2. 布朗运动+价格跳跃：跳跃扩散允许非连续的、突发的大幅价格变动
+#3. 带漂移的随机游走 ：GBM 的离散版本。价格在每个时间步长都以一定的概率向上或向下移动一个固定步长，但总体上有一个偏向（漂移）。
 
 '''
 13.2 Fit the time series of dollar bars of E-mini S&P 500 futures to an O-U process.
 Given those parameters:
-(a) Produce a heat-map of Sharpe ratios for various profit-taking and stop-loss
-levels.
-(b) What is the OTR?
+(a) Produce a heat-map of Sharpe ratios for various profit-taking and stop-loss levels.
+(b) What is the OTR?  即最优止盈止损条件。
 '''
+
+#这里拿中证2000 作为例子进行计算。 但是找不到，找某个股票的5min级别数据来进行。赣锋锂业 (002460)
+import pandas as pd
+import baostock as bs
+
+lg = bs.login()
+
+stock_code = "sz.002460"  # 股票代码，格式为 "市场.代码"，例如 sh.600000 (浦发银行) 或 sz.000001 (平安银行)
+start_date = "2025-01-06" # 开始日期，格式 YYYY-MM-DD
+end_date = "2025-01-06"   # 结束日期，格式 YYYY-MM-DD (可以是同一天获取当天数据)
+frequency = "5"           # 数据频率：'d' for day, 'w' for week, 'm' for month, '5' for 5min, '15' for 15min, '30' for 30min, '60' for 60min
+adjustflag = "3"          # 复权标志：'3' for 不复权, '2' for 后复权, '1' for 前复权
+
+# 2. 调用查询函数
+rs = bs.query_history_k_data_plus(stock_code,
+                                  "date,time,code,open,high,low,close,volume,amount,adjustflag", # 指定要查询的字段
+                                  start_date=start_date,
+                                  end_date=end_date,
+                                  frequency=frequency,
+                                  adjustflag=adjustflag)
+
+if rs.error_code != '0':
+    print(f"Query failed. Error code: {rs.error_code}, Error message: {rs.error_msg}")
+else:
+    print("Query succeeded. Fetching data...")
+
+ # 4. 循环读取数据并存入列表
+data_list = []
+while (rs.error_code == '0') & rs.next():
+    data_list.append(rs.get_row_data())
+
+# 5. 将列表转换为 pandas DataFrame
+result = pd.DataFrame(data_list, columns=rs.fields)
+
+#time 的格式转换。20250106133500000转为 2025-01-06 13：35：00 000 年月日 时分秒格式
+result['time']=pd.to_datetime(result['time'], format='%Y%m%d%H%M%S%f')
+
+bs.logout()
+
+
+
 
 '''
 13.3 Repeat exercise 2, this time on a time series of dollar bars of
@@ -4583,7 +4632,8 @@ Chapter 20.
 第十三章总结：
 1.提出了如何根据原数据构建止盈止损条件。能够在数学上证明的，不是基于回测的。（回测不是研究手段，用回测实现止盈止损有很大的过拟合嫌疑）。也就是能够使用在三重障碍法的上下障碍的止盈止损条件，类似。
 2.通过实验得到了对应市场状态（forecast（趋势值）, hl（半衰期））下的最优止盈止损条件。状态，只需要判断市场是什么样的市场和半衰期就可以根据本章的batch函数，得到最优的止盈止损条件。或者按照课本去对应出来已有的结果，也能出个大概。
-3.通过将价格平稳化后可以计算OU过程的参数，即长期均衡价格 (forecast)，半衰期 (hl)，连续 O-U 过程的波动率参数（年化） (sigma)。而且这就与前面数据处理的过程联系起来，要使得数据平稳，正态，才富有统计意义。
+3.通过将价格平稳化后可以计算OU过程的参数，即长期均衡价格 (forecast)，半衰期 (hl)，连续 O-U 过程的波动率参数（年化） (sigma)。而且这就与前面数据处理的过程联系起来，要使得数据平稳，正态，才富有统计意义。———————— 一般来说，需要使用对数价格，对数收益率来进行adf检验，因为一般来说，价格是很少能一阶平稳的！！！！
+4.基于不同的统计模型，可以开发不同的止盈止损条件。比如，价格呈指数增长或下降趋势时，适合使用几何布朗运动（GBM）+ 趋势 (Drift) 模型。
 
 
 
