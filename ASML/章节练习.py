@@ -4563,8 +4563,8 @@ import baostock as bs
 
 lg = bs.login()
 
-stock_code = "sz.002460"  # 股票代码，格式为 "市场.代码"，例如 sh.600000 (浦发银行) 或 sz.000001 (平安银行)
-start_date = "2025-01-06" # 开始日期，格式 YYYY-MM-DD
+stock_code = "sz.002460"  # 股票代码，格式为 "市场.代码"，例如 sh.600000 (浦发银行) 赣锋锂业sz.002460
+start_date = "2016-01-06" # 开始日期，格式 YYYY-MM-DD
 end_date = "2025-01-06"   # 结束日期，格式 YYYY-MM-DD (可以是同一天获取当天数据)
 frequency = "5"           # 数据频率：'d' for day, 'w' for week, 'm' for month, '5' for 5min, '15' for 15min, '30' for 30min, '60' for 60min
 adjustflag = "3"          # 复权标志：'3' for 不复权, '2' for 后复权, '1' for 前复权
@@ -4595,6 +4595,48 @@ result['time']=pd.to_datetime(result['time'], format='%Y%m%d%H%M%S%f')
 
 bs.logout()
 
+#resample data
+def dd_bars(data: pd.DataFrame, m: int = None):
+    '''
+    params: data => dataframe of close series
+    params: column => column of data sample; vol, dollar etc  累计阈值门槛，达到就重采样
+    '''    
+    ts, idx = 0, []
+    for i, x in enumerate(data):
+        ts += x
+        if ts >= m:
+            ts = 0; idx.append(i)
+            continue
+    return data.iloc[idx]
+
+#转数字  因为amount是字符串，需要转换为数字
+result['amount']=pd.to_numeric(result['amount'], errors='ignore')
+#time 设为索引
+result.set_index('time', inplace=True)
+
+#计算有多少个交易日 将总金额平均到交易日级别
+days=result['date'].nunique()
+total_amount=result['amount'].sum()
+avg_amount_per_day=total_amount/days
+result_dollar_bars=dd_bars(result['amount'], avg_amount_per_day)
+result_dollar_bars=pd.DataFrame(result_dollar_bars)
+
+#拿close作为价格,取log价格 并进行ar1检验是否平稳
+result_dollar_bars['close']=result['close'].reindex(result_dollar_bars.index)
+result_dollar_bars['close']=pd.to_numeric(result_dollar_bars['close'], errors='ignore')
+result_dollar_bars['close_log']=np.log(result_dollar_bars['close'])
+
+#对价差 log(P1) - log(P2) 进行ar1检验是否平稳，平稳了了竟然。只使用log(P1) 进行检验是不平稳的，太夸张了，这可是真是的K线数据。
+result_dollar_bars['close_log_diff']=result_dollar_bars['close_log'].diff()
+from statsmodels.tsa.stattools import adfuller
+adf_result = adfuller(result_dollar_bars['close_log_diff'].dropna())
+print('ADF Statistic:', adf_result[0])
+print('p-value:', adf_result[1])
+print('Critical Values:')
+for key, value in adf_result[4].items():
+    print(f'   {key}: {value}')
+
+#已经平稳，然后根据本章内容进行最优止盈止损条件分析。
 
 
 
