@@ -4326,7 +4326,9 @@ quartile, and buy the long quartile. Performance is amazing. What’s the sin
 from random import gauss
 from itertools import product
 import statsmodels.api as sm
-import tqdm
+from tqdm import tqdm
+import itertools
+import numpy as np
 
 # main()遍历了市场状态,然后batch（）是止盈止损，甚至是三重障碍的设置。因为不管是什么策略，都是用类似的止盈止损策略，比如2.5个标准差止盈止损之类的。而市场状态都是遍历了的，所以也不需要额外的设置了。
 #选择好这些预定的参数后，再通过百万次路径的模拟，展示出相应的夏普比率，然后计算出对应较优的止盈止损。
@@ -4742,20 +4744,158 @@ result_dollar_bars['close'].describe() #均值为73，标准差为32.3  跟上�
 traders specialized by product?
 '''
 
+#同样的代码，替换数据源即可。不同的市场状态下，最优止盈止损条件是不同的。所以让不同的交易员专门做不同的品种是正确的选择。
+#在13.2中使用了不平稳的价格P对构建otr，现在要使用第五章内容先把价格处理为平稳的，再生成otr。
+#获取重采样后的close价格
+result_dollar_bars=result_dollar_bars 
+#根据分数阶和阈值确定窗口大小
+from fracdiff.sklearn.tol import window_from_tol_coef
+window = window_from_tol_coef(0.5, 1e-4)
+print('合适窗口大小:',window)
+
+from fracdiff.sklearn import FracdiffStat,fracdiff
+series_2d = result_dollar_bars['close'].to_numpy().reshape(-1, 1)
+ffd = FracdiffStat(window=window , precision=1e-4,lower=0,upper=1.0, pvalue=0.05,mode = 'valid')  
+y=ffd.fit_transform(series_2d)
+# 计算ADF统计量和p值
+adf_result = adfuller(y)
+print('ADF Statistic: %f' % adf_result[0])
+print('p-value: %f' % adf_result[1])
+print(f"最小d值: {ffd.d_[0]:.9f}")  
+
+#已经分数阶差分，平稳且具有记忆性，然后根据本章内容进行最优止盈止损条件分析。
+#对分数阶差分结果进行搜寻OTR，那么数据也要应用于分数阶差分的结果，即新的5min数据转为dollar bar 再转为分数阶，然后再进行止盈止损判断。
+
+#    FracdiffStat(mode='valid') 会丢弃前面的 window_length 个数据点，要恢复索引得从原数据取回
+y_series = pd.Series(y.flatten(), index=result_dollar_bars.index[window-1:], name='close_fracdiffed_valid')
+#y_series画图
+import matplotlib.pyplot as plt
+plt.figure(figsize=(12, 6))
+plt.plot(y_series, label='Fractional Differenced Close')
+plt.title('Fractional Differenced Close Price')
+plt.xlabel('Date')
+plt.ylabel('Close Price')
+plt.legend()
+plt.show()
+
+#计算市场条件
+params_y=estimate_ou_parameters(y_series.dropna())
+#计算OTR 暂不使用多线程版本扛不住
+seed_list=[y_series.mean()-2*y_series.std(),y_series.mean()+2*y_series.std()]
+output_y=batch_v2(params_y, nIter=1e5, maxHP=np.linspace(5, 100, 20), rPT=np.linspace(0.5, 10, 20), rSLm=np.linspace(0.5, 10, 20), seed=seed_list)
+
+#转为dataframe
+df_y=pd.DataFrame(output_y, columns=['PT', 'SL', 'maxHP', 'Mean', 'Std', 'Sharpe'])
+df_y.sort_values(by='Sharpe', ascending=False, inplace=True)
+
+#截取前2%，查看'PT', 'SL', 'maxHP'的分布情况
+top_2_percent = df_y.head(int(len(df_y) * 0.02))
+print('前2%的最优参数分布情况：')
+top_2_percent.describe() #最优参数大约是1.7 *2.54=4.3， 9.6*2.54=24.4 ，80 ，sharpe ratio 大约是到0.39的水平，比之前略微有提升，非常明显的低止盈高止损。能够自动的出一个类似的止盈止损，就非常的不错了。
+
+top_1_percent = df_y.head(int(len(df_y) * 0.01))
+print('前1%的最优参数分布情况：')
+top_1_percent.describe() #最优参数大约是1.5 *2.54=3.8， 9.8*2.54=24.9 ，83 ，sharpe ratio 大约是到0.42
+#更偏向极端的小止盈大止损，然后平均的夏普还上升了，更好了。
+
+y_series.describe() #均值为10.9，标准差为6.17，最小值-3，最大值33.3
+
+
 '''
 13.4 Repeat exercise 2 after splitting the time series into two parts:
 (a) The first time series ends on 3/15/2009.
 (b) The second time series starts on 3/16/2009.
 (c) Are the OTRs significantly different?
 '''
+half_len=int(len(result)/2)
+result1=result.iloc[:half_len,:]
+result2=result.iloc[half_len:,:]
+
+#分别合成dollar bar 并差分
+days1=result1['date'].nunique()
+days2=result2['date'].nunique()
+
+avg_amount_per_day1=result1['amount'].sum()/days1
+avg_amount_per_day2=result2['amount'].sum()/days2
+
+result1_dollar_bars=dd_bars(result1['amount'], avg_amount_per_day1)
+result2_dollar_bars=dd_bars(result2['amount'], avg_amount_per_day2)
+result1_dollar_bars=pd.DataFrame(result1_dollar_bars)
+result2_dollar_bars=pd.DataFrame(result2_dollar_bars)
+
+#拿close作为价格,取log价格 并进行ar1检验是否平稳
+result1_dollar_bars['close']=result1['close'].reindex(result1_dollar_bars.index)
+result1_dollar_bars['close']=pd.to_numeric(result1_dollar_bars['close'], errors='ignore')
+result2_dollar_bars['close']=result2['close'].reindex(result2_dollar_bars.index)
+result2_dollar_bars['close']=pd.to_numeric(result2_dollar_bars['close'], errors='ignore')
+
+
+#差分
+#根据分数阶和阈值确定窗口大小
+from fracdiff.sklearn.tol import window_from_tol_coef
+window = window_from_tol_coef(0.6, 1e-4)
+print('合适窗口大小:',window)
+
+from fracdiff.sklearn import FracdiffStat,fracdiff
+series_2d1 = result1_dollar_bars['close'].to_numpy().reshape(-1, 1)
+ffd = FracdiffStat(window=window , precision=1e-4,lower=0,upper=1.0, pvalue=0.05,mode = 'valid')  
+y1=ffd.fit_transform(series_2d1)
+print(f"第一个时间序列的最小d值: {ffd.d_[0]:.9f}")
+
+series_2d2 = result2_dollar_bars['close'].to_numpy().reshape(-1, 1)
+y2=ffd.fit_transform(series_2d2)
+print(f"第二个时间序列的最小d值: {ffd.d_[0]:.9f}")
+# 计算ADF统计量和p值
+adf_result1 = adfuller(y1)
+adf_result2 = adfuller(y2)
+
+print('第一个时间序列的ADF统计量:', adf_result1[0])
+print('第一个时间序列的p值:', adf_result1[1])
+print('第二个时间序列的ADF统计量:', adf_result2[0])
+print('第二个时间序列的p值:', adf_result2[1])
+
+#计算市场条件
+params_y1=estimate_ou_parameters(pd.Series(y1.flatten(), index=result1_dollar_bars.index[window-1:], name='close_fracdiffed_valid'))
+params_y2=estimate_ou_parameters(pd.Series(y2.flatten(), index=result2_dollar_bars.index[window-1:], name='close_fracdiffed_valid'))
+
+#计算OTR
+seed_list=[y1.mean()-2*y1.std(),y1.mean()+1*y1.std()]
+output_y1=batch_v2(params_y1, nIter=1e5, maxHP=np.linspace(5, 100, 20), rPT=np.linspace(0.5, 10, 20), rSLm=np.linspace(0.5, 10, 20), seed=seed_list)
+
+seed_list=[y2.mean()-2*y2.std(),y2.mean()+1*y2.std()]
+output_y2=batch_v2(params_y2, nIter=1e5, maxHP=np.linspace(5, 100, 20), rPT=np.linspace(0.5, 10, 20), rSLm=np.linspace(0.5, 10, 20), seed=seed_list)
+
+#转为dataframe
+df_y1=pd.DataFrame(output_y1, columns=['PT', 'SL', 'maxHP', 'Mean', 'Std', 'Sharpe'])
+df_y1.sort_values(by='Sharpe', ascending=False, inplace=True)
+
+df_y2=pd.DataFrame(output_y2, columns=['PT', 'SL', 'maxHP', 'Mean', 'Std', 'Sharpe'])
+df_y2.sort_values(by='Sharpe', ascending=False, inplace=True)
+
+#查看前2%的最优参数分布情况
+top_2_percent_y1 = df_y1.head(int(len(df_y1) * 0.02))
+print('第一个时间序列前2%的最优参数分布情况：')
+top_2_percent_y1.describe()  #1.3*3.15=4，9.3*3.15=29.3，81， sharpe ratio 0.63
+
+top_2_percent_y2 = df_y2.head(int(len(df_y2) * 0.02))
+print('第二个时间序列前2%的最优参数分布情况：')
+top_2_percent_y2.describe() #0.9*1.7=1.53,8.7*1.7=14.79，81 ， sharpe ratio 1.15
+
+#对半切开后 最优止盈止损发生了变化。夏普也相应提高了。 这个结果是更拟合数据了吗？鲁棒性变差了，这是肯定的，但是为什么夏普也提高了呢？
+#完整数据是包含了多个市场状态的（例如，从低波动到高波动，或从趋势市到震荡市），分割数据，可能各自处于一个相对一致的市场状态，所以完整数据OTR的结果， 可能在所有时段都表现平平，但是更有鲁棒性。而分割数据是追求市场一致状态下（局部）的最优解，所以出现了夏普更高。
+#延伸：鲁棒性与最优解。过强的鲁棒性会倾向于寻找次优解。所以选择完整数据时候鲁棒性会增加，但是夏普也会下降。其实就是进攻性与防守性的权衡。当然，得把过拟合这样的水分挤出才行。
+
+#仍旧是低止盈，高止损的模式
 
 '''
-13.5 How long do you estimate it would take to derive OTRs on the 100 most liquid
-futures contracts worldwide? Considering the results from exercise 4, how often
-do youthink you mayhavetore-calibrate the OTRs? Does it make sense to pre
-compute this data?
+13.5 How long do you estimate it would take to derive OTRs on the 100 most liquid futures contracts worldwide? Considering the results from exercise 4, how often do youthink you mayhavetore-calibrate the OTRs? Does it make sense to precompute this data?
 '''
 
+#一种品种的数据处理要1天，那么处理完A股的所有股票需要5000天，这个数据处理量有点太过夸张了。
+#使用并行计算，同时算多个品种。上高性能机器。
+
+#对于日/周频策略来说，可能还得按月或者季度更新OTR。#必须得先处理才能使用。
+#对标的进行筛选：在 5000 只股票中，根据某些特征（如行业、市值、流动性）进行分层，然后从每层中抽取样本进行 OTR 计算。只对策略更贴近，或者模型拟合度更好的，筛选出更有可能符合模型假设的股票再进行计算。不要浪费算力。
 
 '''
 13.6 Parallelize Snippets 13.1 and 13.2 using the mpEngine module described in
@@ -4770,7 +4910,836 @@ Chapter 20.
 2.通过实验得到了对应市场状态（forecast（趋势值）, hl（半衰期））下的最优止盈止损条件。状态，只需要判断市场是什么样的市场和半衰期就可以根据本章的batch函数，得到最优的止盈止损条件。或者按照课本去对应出来已有的结果，也能出个大概。
 3.通过将价格平稳化后可以计算OU过程的参数，即长期均衡价格 (forecast)，半衰期 (hl)，连续 O-U 过程的波动率参数（年化） (sigma)。而且这就与前面数据处理的过程联系起来，要使得数据平稳，正态，才富有统计意义。———————— 一般来说，需要使用对数价格，对数收益率来进行adf检验，因为一般来说，价格是很少能一阶平稳的！！！！
 4.基于不同的统计模型，可以开发不同的止盈止损条件。比如，价格呈指数增长或下降趋势时，适合使用几何布朗运动（GBM）+ 趋势 (Drift) 模型。
-5.好像afml不需要要求平稳也可以出otr，不需要满足任何假设，直接使用estimate_ou_parameters即可。
+5.好像afml不需要要求平稳也可以出otr，不需要满足任何假设，直接使用estimate_ou_parameters即可。————错误的应该先应用第五章的内容对数据进行平稳化处理，然后再使用estimate_ou_parameters。如果价格序列是不平稳的，那么在模拟生成的路径就是错误的，没有参考性。所以要保持平稳。
+6.关键是要使用合适的模型对价格或者收益率数据进行描述，才能进行蒙特卡洛模拟。
+7.（见13.4的练习）鲁棒性与最优解。过强的鲁棒性会倾向于寻找次优解。所以选择完整数据时候鲁棒性会增加，但是夏普也会下降。其实就是进攻性与防守性的权衡。当然，得把过拟合这样的水分挤出才行。
+8。关于起始点seed的选择：参数的hl较大，sigma相对较少，那么起始点的影响会在几十步之内被消除。现在随机选择起点是增强了鲁棒性，但是测试出的结果可能不够稳定。使用数据y的倒数k个数值的平均值作为起点可能会更稳定一些，伴随的是鲁棒性的可能下降。
+
+'''
+
+'''
+ai qwen 对本章的总结,还是挺到位的：
+AFML 推导 OTR 的核心步骤（基于合成数据）
+数据准备与模型校准：
+收集真实数据：获取一个真实的金融时间序列数据（例如，价格 P_t 或收益率 r_t）。
+选择模型：选择一个合适的模型来描述数据的动态。AFML 经常使用自回归模型（如 AR(1)）或其他平稳过程来描述收益率或价格变化。
+估计参数：
+例如，对收益率 r_t 拟合 AR(1) 模型：r_t = β₀ + φ * r_{t-1} + σ * ε_t，其中 ε_t ～ N(0, 1)。
+通过真实数据估计出模型参数：̂β₀, ̂φ (phi-hat), ̂σ (sigma-hat)。
+重要：确保模型是平稳的（例如，|φ| < 1 对于 AR(1)）。
+生成合成路径：
+定义初始条件：使用真实数据中的观测值作为模拟的起点。例如，r_0 (或 P_0)，以及可能的对未来事件的预期 E0[Pi,Ti]。
+蒙特卡洛模拟：使用第一步中估计出的参数 {̂β₀, ̂φ, ̂σ}，生成大量的合成路径。例如，生成 100,000 条未来收益率路径 {r_t^(j)}_{t=1...T}, 其中 j 代表第 j 条路径。
+模拟过程遵循校准后的模型：
+r_t^(j) = ̂β₀ + ̂φ * r_{t-1}^(j) + ̂σ * ε_t^(j) （对于 AR(1)）
+ε_t^(j) 是每次模拟中独立抽取的随机噪声（例如，np.random.normal()）。
+构建价格路径（如果需要）：如果有初始价格 P_0，可以根据合成的收益率路径计算出合成的价格路径 P_t^(j)。
+定义交易策略（参数化）：
+参数化策略：设计一个交易策略，并将其参数化。例如，一个简单的止盈止损（Take Profit & Stop Loss）策略可以用两个参数表示：
+TP (Take Profit Level)：止盈水平。
+SL (Stop Loss Level)：止损水平。
+MaxHP (Maximum Holding Period)：最大持有期（有时也作为一个参数）。
+策略逻辑：定义具体的交易规则，例如，“当累计收益达到 TP 时止盈”，“当累计损失达到 SL 时止损”，“当持有时间达到 MaxHP 时平仓”。
+在合成路径上回测：
+执行策略：对于每一条生成的合成路径 {P_t^(j)} (或 r_t^(j))，应用步骤 3 中定义的交易策略参数 (TP, SL, MaxHP)。
+记录结果：在每条路径上执行策略后，记录下关键指标，例如：
+最终盈亏（P&L）。
+交易持续时间。
+是否触发止盈、止损或到期平仓。
+过程中的最大回撤（Max Drawdown）。
+汇总统计：对所有 N 条路径（例如 100,000 条）上的结果进行汇总，计算期望值和风险指标，例如：
+期望盈亏：E[P&L | TP, SL, MaxHP]
+盈亏标准差：StdDev[P&L | TP, SL, MaxHP]
+夏普比率：E[P&L | TP, SL, MaxHP] / StdDev[P&L | TP, SL, MaxHP]
+期望不足（Expected Tail Loss / CVaR）等。
+优化交易参数（OTR）：
+目标函数：定义一个目标函数来衡量策略的好坏。常见的目标函数是最大化夏普比率，但也可能是最大化期望收益、最小化风险（如标准差或 CVaR）、最大化卡尔马比率（期望收益 / 最大回撤）等。
+参数搜索：在参数空间 {TP, SL, MaxHP} 内进行搜索，找到能使目标函数最优的参数组合。
+网格搜索（Grid Search）：在预定义的 TP, SL, MaxHP 值网格上逐一测试。
+随机搜索（Random Search）。
+贝叶斯优化（Bayesian Optimization）等更高级的优化算法。
+最优交易规则 (OTR)：找到的最优参数组合 (TP*, SL*, MaxHP*) 就构成了最优交易规则。
+
+'''
+
+#%%
+#十四：回测统计
+
+'''
+14.1 A strategyexhibits a high turnover, high leverage, and high number of bets, with a short holding period, low return on execution costs, and a high Sharpe ratio.
+Is it likely to have large capacity? What kind of strategy do you think it is?
+'''
+#zhe 一般是高频策略，资金容量比较小
+#还可能是统计套利、做市商类型、订单流的策略
+
+#大容量和高夏普是相悖的：
+# 经典权衡（Trade-off）
+# 容量 ↑ → 换手 ↓、持有期 ↑、夏普 ↓
+# 夏普 ↑ → 换手 ↑、持有期 ↓、容量 ↓
+
+# 所以小资金想要做大，先搞持有期短，换手率高，高频率的交易。
+
+'''
+14.2 On the dollar bars dataset for E-mini S&P 500 futures, compute
+(a) HHI index on positive returns.
+(b) HHI index on negative returns.
+(c) HHI index on time between bars.
+(d) The 95-percentile DD.
+(e) The 95-percentile TuW.
+(f) Annualized average return.
+(g) Average returns from hits (positive returns).
+(h) Average return from misses (negative returns).
+(i) Annualized SR.
+(j) Information ratio, where the benchmark is the risk-free rate.
+(k) PSR.
+(l) DSR, where we assume there were 100 trials, and the variance of the trials’
+SR was 0.5.
+'''
+
+#获取dollar bars 数据
+import pandas as pd
+import baostock as bs
+
+lg = bs.login()
+
+stock_code = "sz.002460"  # 股票代码，格式为 "市场.代码"，例如 sh.600000 (浦发银行) 赣锋锂业sz.002460
+start_date = "2016-01-06" # 开始日期，格式 YYYY-MM-DD
+end_date = "2025-01-06"   # 结束日期，格式 YYYY-MM-DD (可以是同一天获取当天数据)
+frequency = "5"           # 数据频率：'d' for day, 'w' for week, 'm' for month, '5' for 5min, '15' for 15min, '30' for 30min, '60' for 60min
+adjustflag = "2"          # 复权标志：'3' for 不复权, '2' for 后复权, '1' for 前复权
+
+# 2. 调用查询函数
+rs = bs.query_history_k_data_plus(stock_code,
+                                  "date,time,code,open,high,low,close,volume,amount,adjustflag", # 指定要查询的字段
+                                  start_date=start_date,
+                                  end_date=end_date,
+                                  frequency=frequency,
+                                  adjustflag=adjustflag)
+
+if rs.error_code != '0':
+    print(f"Query failed. Error code: {rs.error_code}, Error message: {rs.error_msg}")
+else:
+    print("Query succeeded. Fetching data...")
+
+ # 4. 循环读取数据并存入列表
+data_list = []
+while (rs.error_code == '0') & rs.next():
+    data_list.append(rs.get_row_data())
+
+# 5. 将列表转换为 pandas DataFrame
+result = pd.DataFrame(data_list, columns=rs.fields)
+
+#time 的格式转换。20250106133500000转为 2025-01-06 13：35：00 000 年月日 时分秒格式
+result['time']=pd.to_datetime(result['time'], format='%Y%m%d%H%M%S%f')
+
+bs.logout()
+
+#resample data
+def dd_bars(data: pd.DataFrame, m: int = None):
+    '''
+    params: data => dataframe of close series
+    params: column => column of data sample; vol, dollar etc  累计阈值门槛，达到就重采样
+    '''    
+    ts, idx = 0, []
+    for i, x in enumerate(data):
+        ts += x
+        if ts >= m:
+            ts = 0; idx.append(i)
+            continue
+    return data.iloc[idx]
+
+#转数字  因为amount是字符串，需要转换为数字
+result['amount']=pd.to_numeric(result['amount'], errors='ignore')
+#time 设为索引
+result.set_index('time', inplace=True)
+
+#计算有多少个交易日 将总金额平均到交易日级别
+days=result['date'].nunique()
+total_amount=result['amount'].sum()
+avg_amount_per_day=total_amount/days
+result_dollar_bars=dd_bars(result['amount'], avg_amount_per_day)
+result_dollar_bars=pd.DataFrame(result_dollar_bars)
+
+result_dollar_bars['close']=result['close'].reindex(result_dollar_bars.index)
+result_dollar_bars['close']=pd.to_numeric(result_dollar_bars['close'], errors='ignore')
+result_dollar_bars['close_log']=np.log(result_dollar_bars['close'])
+result_dollar_bars['return']=result_dollar_bars['close_log'].diff()
+#HHI 计算函数
+import numpy as np
+
+def getHHI(betRet):
+    """
+    计算归一化的赫芬达尔-赫希曼指数 (Normalized HHI)。
+    
+    Parameters:
+        betRet (array-like): 每次下注的收益率。
+        
+    Returns:
+        float: 归一化 HHI，范围 [0, 1]。若 bet 数量 ≤ 2，返回 np.nan。
+               若总和为 0（无法归一化），也返回 np.nan。
+               越接近1说明越是集中，越接近0说明越是分散。
+    """
+    betRet = np.asarray(betRet)
+    n = betRet.shape[0]
+    
+    if n <= 2:
+        return np.nan
+    
+    total = betRet.sum()
+    if total == 0:
+        # 避免除零错误；所有 bet 为 0，无法定义权重
+        return np.nan
+    
+    
+    wght = betRet / total
+    hhi_raw = np.sum(wght ** 2)
+    hhi_norm = (hhi_raw - 1 / n) / (1 - 1 / n)
+    
+    return hhi_norm
+
+#假设是根据dollar bar获取收益
+
+#a 正收益的集中度
+h_p = getHHI(result_dollar_bars['return'][result_dollar_bars['return']>0])
+#b 负收益的集中度
+h_n = getHHI(result_dollar_bars['return'][result_dollar_bars['return']<0])
+#c 每个月交易的数据密度（月交易集中度）  统计每个月内return 观测值,然后计算其集中度
+h_t=getHHI(result_dollar_bars['return'].groupby(result_dollar_bars['return'].index.to_period('M')).count())
+
+#计算DD 和 TUW
+def computeDD_TuW(series, dollars=False):
+    """
+    计算回撤序列（Drawdowns）及其对应的“水下时间”（Time Under Water, TuW）。
+
+    参数:
+        series (pd.Series): 累计盈亏（PnL）或价格的时间序列，索引必须为 DatetimeIndex。不要输入收益率
+        dollars (bool): 
+            - 若为 True，返回以金额（美元）表示的回撤；
+            - 若为 False（默认），返回以比率表示的回撤（例如 0.1 表示 10% 回撤）。
+
+    返回:
+        dd (pd.Series): 回撤幅度序列，索引为每个高水位（HWM）发生的时间点。
+        tuw (pd.Series): 水下时间序列（单位：年），索引为除最后一个高水位外的所有高水位时间点。
+                         （因为最后一个回撤的结束时间未知，故 TuW 比 DD 少一项）
+    """
+    # 处理空输入
+    if series.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    # 确保时间索引按升序排列
+    series = series.sort_index()
+
+    # 步骤1：计算高水位线（High-Water Mark, HWM）
+    df = series.to_frame(name='pnl')
+    df['hwm'] = series.expanding().max()  # 累计最大值即为高水位
+
+    # 步骤2：找出所有“新高点”的时间（即 HWM 发生变化的时刻）
+    hwm_changes = df['hwm'] != df['hwm'].shift(1)
+    peak_times = df[hwm_changes].index  # 这些时间点代表新的高水位确立
+
+    # 初始化存储结果的列表
+    dd_vals = []      # 回撤幅度
+    tuw_vals = []     # 水下时间（年）
+    dd_index = []     # 对应回撤的高水位时间索引
+
+    # 遍历每一对相邻的高水位点
+    for i in range(len(peak_times) - 1):
+        start = peak_times[i]       # 当前高水位时间
+        end = peak_times[i + 1]     # 下一个高水位时间
+
+        hwm_val = df.loc[start, 'hwm']                     # 高水位值
+        min_val = df.loc[start:end, 'pnl'].min()           # 期间最低 PnL
+
+        # 仅当确实发生回撤时才记录（高水位 > 最低值）
+        if hwm_val > min_val:
+            if dollars:
+                dd_val = hwm_val - min_val                  # 金额回撤
+            else:
+                dd_val = 1.0 - min_val / hwm_val            # 比率回撤
+
+            # 计算水下时间（从当前高水位到下一个高水位的持续时间，单位：年）
+            duration_seconds = (end - start).total_seconds()
+            duration_days = duration_seconds / (24 * 3600)   # 转换为天数（保留小数）
+
+            dd_vals.append(dd_val)
+            tuw_vals.append(duration_days)
+            dd_index.append(start)
+
+    # 处理最后一个高水位之后的部分（直到序列结束）
+    if len(peak_times) > 0:
+        start = peak_times[-1]
+        hwm_val = df.loc[start, 'hwm']
+        min_val = df.loc[start:, 'pnl'].min()
+        if hwm_val > min_val:
+            if dollars:
+                dd_val = hwm_val - min_val
+            else:
+                dd_val = 1.0 - min_val / hwm_val
+            dd_vals.append(dd_val)
+            dd_index.append(start)
+            # 注意：最后一个回撤的“水下时间”无法确定（因为没有后续新高），所以 TuW 不包含此项
+
+    # 构造返回的 Series
+    dd = pd.Series(dd_vals, index=dd_index, name='drawdown')
+    tuw = pd.Series(tuw_vals, index=dd_index[:-1] if tuw_vals else [], name='time_under_water')
+
+    return dd, tuw
+
+#统计累计盈亏pnl
+result_dollar_bars['pnl']=np.exp(result_dollar_bars['return'].cumsum()) #对数收益率复原
+result_dollar_bars['pnl'].iloc[0]=1
+dd, tuw=computeDD_TuW(result_dollar_bars['pnl'].dropna(), dollars=False)
+
+#统计95分位dd tuw
+dd95=dd.quantile(0.95)
+tuw95=tuw.quantile(0.95)
+print('dd95',dd95,'tuw95',tuw95)
+print("dd_max:",dd.max(),'tuw_max:',tuw.max())
+#95分位和最值差距还挺大的，需要同时报告这个两个统计。
+
+#f 年化收益
+def compute_annualized_return(pnl_series):
+    """
+    基于累计净值序列计算年化收益率。
+    
+    参数:
+        pnl_series (pd.Series): 累计净值序列，索引为 DatetimeIndex。
+        
+    返回:
+        float: 年化收益率（小数形式，如 0.15 表示 15%）
+    """
+    if len(pnl_series) < 2:
+        return np.nan
+    
+    pnl = pnl_series.dropna()
+    if pnl.empty:
+        return np.nan
+        
+    initial = pnl.iloc[0]
+    final = pnl.iloc[-1]
+    
+    if initial <= 0:
+        return np.nan
+        
+    start = pnl.index[0]
+    end = pnl.index[-1]
+    total_years = (end - start).total_seconds() / (365.25 * 24 * 3600)
+    
+    if total_years <= 0:
+        return np.nan
+        
+    return (final / initial) ** (1 / total_years) - 1
+annual_ret = compute_annualized_return(result_dollar_bars['pnl'])
+print(f"年化收益率: {annual_ret:.2%}")
+
+#盈利平均每次收益，亏损的话平均每次亏损
+result_dollar_bars['return'][(result_dollar_bars['return']>0)].mean()
+result_dollar_bars['return'][(result_dollar_bars['return']<0)].mean()
+
+#年化SR 和信息比率
+#年化夏普即将收益率和波动率都转为年化后再进行计算
+#假设无风险利率=1%
+
+#Dollar Bars 的年化波动率 = 对数收益率标准差 × √(总 bar 数 / 总年数)  假设前提：收益率在时间上是平稳且独立的（i.i.d.）
+log_returns = result_dollar_bars['return'].dropna()
+
+if len(log_returns) < 2:
+    annual_vol = np.nan
+else:
+    # 2. 计算总时间跨度（单位：年）
+    start_time = log_returns.index[0]
+    end_time = log_returns.index[-1]
+    total_seconds = (end_time - start_time).total_seconds()
+    total_years = total_seconds / (365.25 * 24 * 3600)  # 考虑闰年
+
+    # 3. 防止除零
+    if total_years <= 0:
+        annual_vol = np.nan
+    else:
+        # 4. 计算样本标准差（对数收益率的波动率）
+        std_log_ret = log_returns.std(ddof=1)  # ddof=1 表示样本标准差
+
+        # 5. 计算年均 bar 数量（关键！）
+        bars_per_year = len(log_returns) / total_years
+
+        # 6. 年化波动率 = 日（bar）波动率 × √(年均 bar 数)
+        annual_vol = std_log_ret * np.sqrt(bars_per_year)
+#年化夏普比率 = 年化收益率 - 无风险利率 / 年化波动率
+annual_sr=(annual_ret-0.01)/annual_vol
+print(f"年化夏普比率: {annual_sr:.2f}")
+
+#IR就是将无风险利率换为基准收益率，假如对标的还是1%无风险利率，那么IR=SR
+
+
+#PSR
+from scipy.stats import norm, skew, kurtosis
+def probabilistic_sharpe_ratio(
+    returns,
+    sr_benchmark=0.0,
+    annualized=False,
+    trading_periods=None
+):
+    """
+    计算 Probabilistic Sharpe Ratio (PSR) —— Bailey & López de Prado (2012)
+    前提：收益率是平稳、弱相关的,起码要平稳。
+    参数:
+        returns (array-like): 策略的简单收益率序列（非对数！）
+        sr_benchmark (float): 基准夏普比率（如 0 表示检验是否显著为正.1 检验是否达到优秀水平）
+        annualized (bool): 是否输入的是年化收益率？通常设为 False，函数内部处理年化
+        trading_periods (int or None): 
+            - 如果 returns 是日频，且想年化，可设 trading_periods=252
+            - 如果 returns 是 dollar bars 或任意频率，建议设为 None，
+              函数将基于实际观测数 T 计算（更稳健）
+
+    返回:
+        float: PSR(SR*) —— 真实夏普比率 > sr_benchmark 的概率
+    """
+    returns = np.asarray(returns)
+    returns = returns[~np.isnan(returns)]
+    
+    if len(returns) < 3:
+        return np.nan
+
+    T = len(returns)
+
+    # 样本统计量
+    mu = np.mean(returns)
+    sigma = np.std(returns, ddof=1)
+    
+    if sigma == 0:
+        return np.nan if sr_benchmark >= 0 else 1.0
+
+    # 非年化夏普比率
+    sr_hat = mu / sigma
+
+    # 年化处理（可选）
+    if annualized and trading_periods is not None:
+        sr_hat_ann = sr_hat * np.sqrt(trading_periods)
+        sr_benchmark_adj = sr_benchmark
+        sr_diff = sr_hat_ann - sr_benchmark_adj
+        T_eff = T
+    else:
+        sr_diff = sr_hat - sr_benchmark
+        T_eff = T
+
+    # 偏度和峰度（注意：这里必须用 raw kurtosis）
+    skewness = skew(returns, bias=False)
+    raw_kurtosis = kurtosis(returns, fisher=False, bias=False)  # fisher=False → raw kurtosis
+    # 或者手动计算：
+    # raw_kurtosis = np.mean((returns - mu)**4) / sigma**4
+
+    # 计算 z-score（根据原始公式）
+    numerator = sr_diff * np.sqrt(T_eff - 1)
+    
+    denominator = np.sqrt(
+        1 
+        - skewness * sr_hat 
+        + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+    )
+
+    if denominator <= 0:
+        return np.nan
+
+    z_score = numerator / denominator
+    psr = norm.cdf(z_score)
+    return psr
+
+# log_returns 来自 dollar bars
+log_returns = result_dollar_bars['return'].dropna()
+# 转为简单收益率（因为 PSR 公式基于简单收益率推导）
+simple_returns = np.exp(log_returns) - 1
+#加adf检验通过后在计算psr
+from statsmodels.tsa.stattools import adfuller
+
+def check_stationary_adf(series, significance_level=0.05):
+    """
+    使用ADF检验检查序列平稳性
+    
+    Args:
+        series: 时间序列数据
+        significance_level: 显著性水平，默认0.05
+    
+    Returns:
+        dict: 检验结果
+    """
+    result = adfuller(series.dropna(), autolag='AIC')
+    
+    adf_statistic = result[0]
+    p_value = result[1]
+    critical_values = result[4]
+    is_stationary = p_value < significance_level
+    
+    print("=" * 60)
+    print("ADF平稳性检验结果:")
+    print("=" * 60)
+    print(f"ADF统计量: {adf_statistic:.6f}")
+    print(f"P值: {p_value:.6f}")
+    print("临界值:")
+    for key, value in critical_values.items():
+        print(f"  {key}: {value:.6f}")
+    print(f"\n序列是否平稳 (p < {significance_level})? {'是' if is_stationary else '否'}")
+    
+    if not is_stationary:
+        print("\n建议：")
+        print("1. 对序列进行差分")
+        print("2. 使用对数收益率")
+        print("3. 应用去趋势或季节性分解")
+    
+    return {
+        'adf_statistic': adf_statistic,
+        'p_value': p_value,
+        'critical_values': critical_values,
+        'is_stationary': is_stationary
+    }
+
+adf_result = check_stationary_adf(simple_returns)
+
+psr = probabilistic_sharpe_ratio(
+    returns=simple_returns,
+    sr_benchmark=0.0,
+    trading_periods=None  # 不年化，用原始频率
+)
+print(f"Dollar Bar PSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+
+#DSR where we assume there were 100 trials, and the variance of the trials’ SR was 0.5.
+import numpy as np
+from scipy.stats import norm
+
+# Euler-Mascheroni constant
+GAMMA = 0.5772156649
+
+def deflated_sharpe_ratio_afml(
+    sr_trials,
+    alpha=0.05,
+    annualized=False,
+    trading_periods=None
+):
+    """
+    使用 AFML 中的 DSR 公式（基于多组试验的 SR 方差）
+    
+    参数:
+        sr_trials: list 或 array of float —— 每次独立试验的样本夏普比率（非年化）
+        alpha: 显著性水平（用于 PSR 的置信度）
+        annualized: 是否年化？若 True，则需 trading_periods
+        trading_periods: 年化因子（如 252）
+
+    返回:
+        float: DSR —— P(SR_true > SR*) 用于计算当前策略的 DSR 的SR*
+    """
+    sr_trials = np.asarray(sr_trials)
+    if len(sr_trials) < 2:
+        return np.nan
+
+    N = len(sr_trials)
+    V = np.var(sr_trials, ddof=1)  # 样本方差
+
+    if V <= 0:
+        return np.nan
+
+    # 计算 SR*
+    z1 = norm.ppf(1 - 1/N)           # Z^{-1}[1 - 1/N]
+    z2 = norm.ppf(1 - 1/(N * np.exp(1)))  # Z^{-1}[1 - 1/(Ne)]
+
+    sr_star = np.sqrt(V) * (
+        (1 - GAMMA) * z1 +
+        GAMMA * z2
+    )
+
+
+    return sr_star
+
+def deflated_sharpe_ratio_complete(
+    returns,
+    sr_trials,
+    annualized=False,
+    trading_periods=None
+):
+    """
+    完整的 DSR 计算：先估计 SR*，再计算 PSR(SR*)
+    
+    参数:
+        returns: 当前策略的收益率序列（用于计算 PSR）
+        sr_trials: 其他独立试验的夏普比率列表（用于估计 SR*）
+        ...
+    """
+    # Step 1: 估计 SR*
+    sr_star = deflated_sharpe_ratio_afml(sr_trials)
+
+    # Step 2: 计算 PSR(SR*) 即最终的DSR
+    DSR = probabilistic_sharpe_ratio(
+        returns=returns,
+        sr_benchmark=sr_star,
+        annualized=annualized,
+        trading_periods=trading_periods
+    )
+
+    return DSR
+
+#假设N=100，v=0.5，计算DSR
+N = 100
+V = 0.5  # 样本方差
+
+# 计算 SR*
+z1 = norm.ppf(1 - 1/N)           # Z^{-1}[1 - 1/N]
+z2 = norm.ppf(1 - 1/(N * np.exp(1)))  # Z^{-1}[1 - 1/(Ne)]
+
+sr_star = np.sqrt(V) * (
+    (1 - GAMMA) * z1 +
+    GAMMA * z2
+)
+DSR=probabilistic_sharpe_ratio(
+    returns=simple_returns,
+    sr_benchmark=0.0,
+    trading_periods=None  # 不年化，用原始频率
+)
+print(f"DSR: {DSR:.4f}，是否统计显著：{'是' if DSR > 0.95 else '否'}")
+
+
+
+'''
+14.3 Consider a strategy that is long one futures contract on even years, and is short
+one futures contract on odd years.
+(a) Repeat the calculations from exercise 2.
+(b) What is the correlation to the underlying?
+'''
+
+#策略收益与标的品种的相关性更低。
+
+
+'''
+14.4 The results from a 2-year backtest are that monthly returns have a mean of 3.6%,
+and a standard deviation of 7.9%
+(a) What is the SR?
+(b) What is the annualized SR?
+'''
+
+#a  SR=3.6/7.9=0.456
+#b  年化SR=0.456*np.sqrt(12)=1.58
+
+
+'''
+14.5 Following on exercise 4:
+(a) The returns have a skewness of 0 and a kurtosis of 3. What is the PSR?
+(b) Thereturns have a skewness of-2.448 and a kurtosis of 10.164. What is the
+PSR?
+'''
+
+ #a  样本统计量
+mu = 0.0036
+sigma = 0.079
+
+sr_benchmark=0
+
+# 非年化夏普比率
+sr_hat = mu / sigma
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T = 24  # 2年，24个观测
+
+# 偏度和峰度
+skewness = 0
+raw_kurtosis = 3
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"PSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+#b
+mu = 0.0036
+sigma = 0.079
+
+sr_benchmark=0
+
+# 非年化夏普比率
+sr_hat = mu / sigma
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T = 24  # 2年，24个观测
+
+# 偏度和峰度
+skewness = -2.448
+raw_kurtosis = 10.164
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"PSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+
+
+
+'''
+14.6 What would be the PSR from 2.b,if the backtest had been for a length of 3 years?
+'''
+mu = 0.0036
+sigma = 0.079
+
+sr_benchmark=0
+
+# 非年化夏普比率
+sr_hat = mu / sigma
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T = 36  # 3年，36个观测
+
+# 偏度和峰度
+skewness = 0
+raw_kurtosis = 3
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"PSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+'''
+14.7 A 5-year backtest has an annualized SR of 2.5, computed on daily returns. The
+skewness is-3 and the kurtosis is 10.
+(a) What is the PSR?
+(b) In order to find that best result, 100 trials were conducted. The variance of
+the Sharpe ratios on those trials is 0.5. What is the DSR?
+'''
+#a
+#观测期数量 T 必须使用收益率序列的实际观测点数
+#虽然sr_hat 是年化的，但偏度、峰度、$T$ 都来自原始日频数据
+
+sr_benchmark=0
+
+sr_hat = 2.5
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T = 5*252  # 5年，5*252个观测
+
+# 偏度和峰度
+skewness = -3
+raw_kurtosis = 10
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"PSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+#b 先计算sr_benchmark 再替代psr里面的sr_benchmark计算结果就是DSR
+N = 100
+V = 0.5  # 样本方差
+
+# 计算 SR* 
+z1 = norm.ppf(1 - 1/N)           # Z^{-1}[1 - 1/N]
+z2 = norm.ppf(1 - 1/(N * np.exp(1)))  # Z^{-1}[1 - 1/(Ne)]
+
+sr_star = np.sqrt(V) * (
+    (1 - GAMMA) * z1 +
+    GAMMA * z2
+)
+sr_benchmark=sr_star
+
+sr_hat = 2.5
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T = 5*252  # 5年，5*252个观测
+
+# 偏度和峰度
+skewness = -3
+raw_kurtosis = 10
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"DSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
+
+
+
+
+'''
+第十四章总结：
+1.列出了很多指标，但是我只关注我想关注的一部分：
+    timerange：尽可能的长，过短的回测说明不了什么，
+    alpha与beta ：是否创造出来独立于市场的策略，有独立盈利能力，
+    leverage： 杠杆，
+    资金容量 与策略执行平均资金量，
+    收益，
+    年化收益，
+    胜率，
+    平均每笔的盈利与亏损，
+    索诺比率，
+    hh 集中度：描述正收益，负收益，按时间收益是否集中，顺滑，没有肥尾。即收益曲线是否是偏向顺滑的，还是激增。（SNIPPET 14.3 ） 理想情况是 h+（正收益集中度）很低，h-（负收益集中度低），h_t(时间收益集中度低)
+    回撤（drawdown,DD）：收益序列两个高点间的最大损失，
+    最大回撤：所有回撤里面最大的，
+    水下时间（The time under water,TuW）：是指从一个高点到盈亏超过之前最大盈亏之间经过的时间,
+    平均水下时间和最大水下时间：描述亏损时痛苦时长。
+    衍生：95分位DD，95分位TuW。《AFML》里使用这两个指标当做最大回撤和最大水下时间的替代指标。可能比选择最大的好点，毕竟使用最大回撤/最大水下时间比较的话容易对市场的噪音过拟合。
+    执行成本：包括经纪费，滑动，印花税等等。对每次交易都有冲击，对高频策略影响比较大。
+    夏普比率（SR），
+    概率夏普比率（PSR）：修正由于斜率，肥尾导致的夏普膨胀效应，即收益如果是斜率异常，或肥尾，夏普比例的估计是有偏的，就需要修正。 验算的是真实夏普比率 > sr_benchmark 的概率，一般要PSR大于0.95才说明是统计显著的。PSR 不回答“夏普比率是多少”，而是回答“这个夏普比率有多可信”。应用于策略筛选：只保留 PSR > 0.95 的策略；避免过拟合：高 SR 但低 PSR → 可能是数据挖掘假象。
+    膨胀后的夏普比率（DSR）：一种调整后的PSR，其中拒绝阈值被调整以反映试验的多重性。即H0 : SR=0,即真实夏普为0，但是随着实验次数N增加，和实验的方差增加，预期的夏普比例也会增加。需要对所有试验的夏普进行修正才行。————衍生就是回测必须报告所有的尝试结果，否则很容易出现虚假发现。将所有报告结果收集计算DSR才是真实的回测SR。————不要使用回测去选择，回测不是一种试验，因子挖掘才是。即使所有策略都无效（真实 SR = 0），由于随机性，在 1,000 次试验中，总会有几个策略“看起来”表现很好，这就需要DSR去检验。
+
+2.使用PSR和DSR来确定策略收益的真实性，过滤掉数据挖掘产生的水分。
+DSR是PSR的衍生，即基准是经过二次计算的。
+PSR：问 “真实 SR > 0 的概率是多少？  只评估单策略统计显著性
+DSR：问 “真实 SR >（在 1000 次瞎试中能出现的最高 SR）的概率是多少？”  评估策略是否被数据挖掘污染，即DSR 不回答“策略有多好”，而是回答“这个好是不是因为试得太多”
+DSR的使用要搭配上CPCV多路径回测，才能产生多实验路径的，最终计算DSR。
+
+3.使用HHI评估收益集中度，看是否顺畅。
+
+'''
+
+
+#%%
+
+
+#第十五章
+
+
+
+
+
+
+
+'''
+第十五章总结；
+1.（假设是在相同的止盈止损）。在这样的二项分布模型中，高的夏普要么p值大，也就是预测的准确率高；要么n值大，交易频率特别高。这也就是交易的两条最基本的的路线：中低频高准确率和高频微利。——————进而衍生出的使用事件驱动的交易是使用机器学习提高准确度p的策略。
+2.当止盈止损不同时，也可以根据二项分布推导出夏普比例=func(准确率，频率，止盈，止损) 的数学函数。换句话说，确定了准确率，频率，止盈，止损，也就能够直接算出夏普。按照这四个方向进行提升即可。
 
 
 '''
