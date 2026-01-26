@@ -5728,8 +5728,369 @@ DSR的使用要搭配上CPCV多路径回测，才能产生多实验路径的，�
 #%%
 
 
-#第十五章
+#第十五章 策略风险
 
+'''
+15.1 A portfolio manager intends to launch a strategy that targets an annualized SR of 2. Bets have aprecision rate of 60%, with weekly frequency. The exit conditions are 2% for profit-taking, and–2% for stop-loss.
+(a) Is this strategy viable?
+(b) Ceteris paribus, what is the required precision rate that would make the
+strategy profitable?
+(c) For what betting frequency is the target achievable?
+(d) For what profit-taking threshold is the target achievable?
+(e) What would be an alternative stop-loss?
+'''
+
+#a 计算真实夏普比率 由于止盈止损一样，直接使用胜率和频率计算。
+def trueSR(winRate, freq):
+    '''
+    在止盈止损一样时，根据胜率和频率计算真实夏普比率。
+    '''
+    return (2*winRate - 1)/ (2*np.sqrt(winRate*(1-winRate)) )* np.sqrt(freq)
+
+tsr=trueSR(0.6, 52)
+print(tsr)
+
+#tsr=1.47,小于目标SR2，说明策略撒谎了。真实夏普比说明的要小。
+
+#b 假如说的是要盈利的话，已经盈利了。但是如果说的是要达到预定sr=2的话，则还需要计算
+def reqWinRate(sr, freq):
+    '''
+    在止盈止损一样时，根据真实夏普比率和频率计算需要的胜率。
+    '''
+    return 0.5*(1+np.sqrt(1-freq/(sr**2+freq)))
+winRate=reqWinRate(2, 52)
+print(winRate)
+
+#winRate=0.63,说明需要胜率63%才能够达到目标SR2。
+
+#c 假如说的是要达到预定sr=2的话，胜率为0.6，计算需要的频率
+
+def reqFreq(sr, winRate):
+    '''
+    在止盈止损一样时，根据真实夏普比率和胜率计算需要的频率。
+    '''
+    return ( (sr*2*np.sqrt(winRate*(1-winRate)))/(2*winRate - 1) )**2
+freq=reqFreq(2, 0.6)
+print(freq)
+
+#freq=96,说明需要96次下注每年才能够达到目标SR2。
+
+#d 假如说的是要达到预定sr=2的话，胜率为0.6，计算需要的盈利阈值 与 止损阈值
+#瞪眼法解不出方程了，不想用手算，直接上模拟吧
+
+def TSR_withptsl(winRate,freq,pt,sl):
+    '''
+    在止盈止损不一样时，计算真实夏普比率
+    '''
+    return ( (pt-sl)*winRate+sl ) /( (pt-sl)*np.sqrt(winRate*(1-winRate)) ) * np.sqrt(freq)
+
+# 固定参数
+winRate = 0.6      # 示例胜率，可按需修改
+freq = 52         # 年化频率（如日频）
+sl = -0.02         # 止损（负数），例如 -2%
+target_sr = 2.0    # 目标夏普比率
+
+# 生成 pt 范围
+pt_values = np.arange(0, 0.1, 0.0001)  # 注意：0.1001 确保包含 0.1
+
+# 存储最接近的结果
+best_pt = None
+best_sr = None
+min_diff = np.inf
+
+for pt in pt_values:
+    sr = TSR_withptsl(winRate, freq, pt, sl)
+    if np.isnan(sr):
+        continue
+    diff = abs(sr - target_sr)
+    if diff < min_diff:
+        min_diff = diff
+        best_pt = pt
+        best_sr = sr
+
+# 输出结果
+print(f"目标夏普比率: {target_sr}")
+print(f"最优止盈 pt: {best_pt:.3f}")
+print(f"对应 TSR: {best_sr:.4f}")
+print(f"与目标的绝对误差: {min_diff:.6f}")
+
+# 求解得pt=0.023时能够达到2的sr
+
+#e 改为求解sl
+
+# 固定参数
+winRate = 0.6      # 示例胜率，可按需修改
+freq = 52         # 年化频率（如日频）
+pt = 0.02         
+target_sr = 2.0    # 目标夏普比率
+
+# 生成 sl 范围
+sl_values = np.arange(-0.1, 0, 0.0001)  # 注意：0.1001 确保包含 0.1
+
+# 存储最接近的结果
+best_sl = None
+best_sr = None
+min_diff = np.inf
+
+for sl in sl_values:
+    sr = TSR_withptsl(winRate, freq, pt, sl)
+    if np.isnan(sr):
+        continue
+    diff = abs(sr - target_sr)
+    if diff < min_diff:
+        min_diff = diff
+        best_sl = sl
+        best_sr = sr
+
+# 输出结果
+print(f"目标夏普比率: {target_sr}")
+print(f"最优止损 sl: {best_sl:.3f}")
+print(f"对应 TSR: {best_sr:.4f}")
+print(f"与目标的绝对误差: {min_diff:.6f}")
+
+# 求解得sl=-0.017时能够达到2的sr,其他不变的话
+
+
+
+'''
+15.2 Following up on the strategy from exercise 1.
+(a) What is the sensitivity of SR to a 1% change in each parameter?
+(b) Given these sensitivities, and assuming that all parameters are equally hard
+to improve, which one offers the lowest hanging fruit?
+(c) Does changing any of the parameters in exercise 1 impact the others? For
+example, does changing the betting frequency modify the precision rate,
+etc.?
+'''
+#a 
+winRate=0.6
+freq=52
+pt=0.02
+sl=-0.02
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+
+winRate=0.6*1.01
+freq=52
+pt=0.02
+sl=-0.02
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+
+
+winRate=0.6
+freq=52*1.01
+pt=0.02
+sl=-0.02
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+
+winRate=0.6
+freq=52
+pt=0.02*1.01
+sl=-0.02
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+
+winRate=0.6
+freq=52
+pt=0.02
+sl=-0.02*1.01
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+
+#敏感度排名： winRate sl  pt freq  而且winRate遥遥领先
+
+#b #1.4719601443879746 这个是基准， 其他参数都在这个基础上变化
+winRate=0.6
+freq=52
+pt=0.02
+sl=-0.02*0.99
+tsr=TSR_withptsl(winRate,freq,pt,sl)
+print(tsr)
+#发现winRate敏感度非常大，提升1%都很明显。改进胜率最好了。频率最不敏感，这个提升不明显。
+
+#c 在实际策略上，改变其中一项，其他参数都是会改变的，所以很难维持都其余都不变。所以实盘最优解只能是向着某个方向进行改进。
+
+'''
+15.3 Suppose a strategy that generates monthly bets over two years, with returns
+following a mixture of two Gaussian distributions. The first distribution has
+a mean of–0.1 and a standard deviation of 0.12. The second distribution has
+a mean of 0.06 and a standard deviation of 0.03. The probability that a draw
+comes from the first distribution is 0.15.
+(a) Following L´opez de Prado and Peijan [2004] and L´opez de Prado and Fore
+man [2014], derive the first four moments for the mixture’s returns.
+(b) What is the annualized SR?
+(c) Using those moments, compute PSR[1] (see Chapter 14). At a 95% confi
+dence level, would you discard this strategy?
+'''
+
+#a  f(x)=w1f（x1）+ (1−w)f(x2)  混合分布
+def gaussian_mixture_moments(
+    w: float,
+    mu1: float, sigma1: float,
+    mu2: float, sigma2: float,
+    return_central: bool = False
+):
+    """
+    计算双高斯混合分布的前四阶原点矩（raw moments）
+    
+    参数:
+        w: 来自第一个高斯分布的概率 (0 <= w <= 1)
+        mu1, sigma1: 第一个高斯分布的均值和标准差
+        mu2, sigma2: 第二个高斯分布的均值和标准差
+        return_central: 是否额外返回中心矩、偏度、峰度
+    
+    返回:
+        如果 return_central=False:
+            dict with keys 'm1', 'm2', 'm3', 'm4' (raw moments)
+        如果 return_central=True:
+            dict with raw moments + 'var', 'skewness', 'kurtosis'
+    """
+    # 确保概率合法
+    if not (0 <= w <= 1):
+        raise ValueError("w must be between 0 and 1")
+
+    # ---- 第一阶矩 (mean) ----
+    m1 = w * mu1 + (1 - w) * mu2
+
+    # ---- 第二阶矩 ----
+    m2 = w * (mu1**2 + sigma1**2) + (1 - w) * (mu2**2 + sigma2**2)
+
+    # ---- 第三阶矩 ----
+    m3 = w * (mu1**3 + 3 * mu1 * sigma1**2) + (1 - w) * (mu2**3 + 3 * mu2 * sigma2**2)
+
+    # ---- 第四阶矩 ----
+    m4 = (
+        w * (mu1**4 + 6 * mu1**2 * sigma1**2 + 3 * sigma1**4) +
+        (1 - w) * (mu2**4 + 6 * mu2**2 * sigma2**2 + 3 * sigma2**4)
+    )
+
+    result = {
+        'm1': m1,
+        'm2': m2,
+        'm3': m3,
+        'm4': m4
+    }
+
+    if return_central:
+        # 中心矩（central moments）
+        var = m2 - m1**2  # 方差
+        mu3 = m3 - 3 * m1 * m2 + 2 * m1**3  # 三阶中心矩
+        mu4 = m4 - 4 * m1 * m3 + 6 * m1**2 * m2 - 3 * m1**4  # 四阶中心矩
+
+        # 偏度（skewness）和峰度（kurtosis, raw, not excess）
+        if var > 0:
+            skewness = mu3 / (var ** 1.5)
+            kurtosis = mu4 / (var ** 2)
+        else:
+            skewness = np.nan
+            kurtosis = np.nan
+
+        result.update({
+            'variance': var,
+            'skewness': skewness,
+            'kurtosis': kurtosis  # 注意：这是原始峰度，正态分布为3
+        })
+
+    return result
+# 题目参数
+w = 0.15
+mu1, sigma1 = -0.1, 0.12
+mu2, sigma2 = 0.06, 0.03
+
+# 计算前四阶原点矩
+moments = gaussian_mixture_moments(w, mu1, sigma1, mu2, sigma2, return_central=True)
+
+print("【前四阶原点矩】")
+print(f"m1 (均值)     = {moments['m1']:.6f}")
+print(f"m2           = {moments['m2']:.6f}")
+print(f"m3           = {moments['m3']:.6f}")
+print(f"m4           = {moments['m4']:.6f}")
+
+print("\n【中心矩与高阶统计量】")
+print(f"方差         = {moments['variance']:.6f}")
+print(f"偏度         = {moments['skewness']:.4f}")
+print(f"峰度 (raw)   = {moments['kurtosis']:.4f}  (正态=3)")
+
+#b
+
+def annualized_sharpe_from_mixture(
+    w: float,
+    mu1: float, sigma1: float,
+    mu2: float, sigma2: float,
+    periods_per_year: int,
+    risk_free_rate: float = 0.0
+):
+    """
+    从双高斯混合分布计算年化夏普比率
+    
+    参数:
+        w: 第一个成分的概率
+        mu1, sigma1: 成分1的均值和标准差（单期）
+        mu2, sigma2: 成分2的均值和标准差（单期）
+        periods_per_year: 每年交易/观测期数（如月频=12，日频=252）
+        risk_free_rate: 年化无风险利率（默认0）
+    
+    返回:
+        float: 年化夏普比率
+    """
+    # 单期期望收益
+    mu = w * mu1 + (1 - w) * mu2
+    
+    # 单期方差
+    var = (
+        w * (mu1**2 + sigma1**2) +
+        (1 - w) * (mu2**2 + sigma2**2)
+    ) - mu**2
+    
+    if var <= 0:
+        raise ValueError("Variance must be positive")
+    
+    sigma = np.sqrt(var)
+    
+    # 年化
+    annual_mu = mu * periods_per_year
+    annual_sigma = sigma * np.sqrt(periods_per_year)
+    annual_rf = risk_free_rate
+    
+    sharpe = (annual_mu - annual_rf) / annual_sigma
+    return sharpe
+
+w = 0.15
+mu1, sigma1 = -0.10, 0.12   # 第一个分布（亏损状态）
+mu2, sigma2 =  0.06, 0.03   # 第二个分布（盈利状态）
+freq = 12                   # 月频
+
+sr_annual = annualized_sharpe_from_mixture(
+    w, mu1, sigma1, mu2, sigma2, freq
+)
+
+print(f"年化夏普比率 = {sr_annual:.4f}")
+
+#计算psr
+
+
+'''
+15.4 UsingSnippet 15.5, compute P[p < p𝜃∗=1]forthestrategy described in exercise
+3. At a significance level of 0.05, would you discard this strategy? Is this result
+consistent with PSR[𝜃∗]?
+'''
+
+'''
+15.5 In general, what result do you expect to be more accurate, PSR[𝜃∗] or
+P[p < p𝜃∗=1]? How are these two methods complementary?
+'''
+
+'''
+15.6 Re-examine the results from Chapter 13, in light of what you have learned in
+this chapter.
+(a) Doestheasymmetrybetweenprofittakingandstop-lossthresholdsinOTRs
+make sense?
+(b) WhatistherangeofpimpliedbyFigure13.1,foradailybettingfrequency?
+(c) What is the range of p implied by Figure 13.5, for a weekly betting fre
+quency?
+
+'''
 
 
 
@@ -5740,6 +6101,7 @@ DSR的使用要搭配上CPCV多路径回测，才能产生多实验路径的，�
 第十五章总结；
 1.（假设是在相同的止盈止损）。在这样的二项分布模型中，高的夏普要么p值大，也就是预测的准确率高；要么n值大，交易频率特别高。这也就是交易的两条最基本的的路线：中低频高准确率和高频微利。——————进而衍生出的使用事件驱动的交易是使用机器学习提高准确度p的策略。
 2.当止盈止损不同时，也可以根据二项分布推导出夏普比例=func(准确率，频率，止盈，止损) 的数学函数。换句话说，确定了准确率，频率，止盈，止损，也就能够直接算出夏普。按照这四个方向进行提升即可。
-
+3.本章介绍的方法通过非对称二元结果推导策略失败的概率，与上一章内容介绍互为表里。主要是增加了投资经理限制，即只能修改止盈止损和下注次数时，策略是预测准确率p小于夏普为0时p*的概率为多少。作为个人交易员，只需要使用14章的内容确定真实夏普有效即可，不需要做额外的限制。或者我可以用这个额外的限制去考虑别人的策略情况。
+4. 另一个问题是，本章的模型是二项分布，没有考虑赌注的可变性。当然，仅计算每次下注的收益率就行了，不需要考虑赌注大小。这个问题不大。
 
 '''
