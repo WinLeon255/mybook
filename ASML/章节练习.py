@@ -6068,33 +6068,185 @@ sr_annual = annualized_sharpe_from_mixture(
 print(f"年化夏普比率 = {sr_annual:.4f}")
 
 #计算psr
+T = 2*12
+
+# 年化夏普比率
+sr_hat = sr_annual
+sr_benchmark=1 #以0为基准，判断是否有效
+
+sr_diff = sr_hat - sr_benchmark
+T_eff = T
+
+# 偏度和峰度 使用上一小问计算的结果
+skewness = -2.4477
+raw_kurtosis = 10.1642 
+
+
+# 计算 z-score（根据原始公式）
+numerator = sr_diff * np.sqrt(T_eff - 1)
+
+denominator = np.sqrt(
+    1 
+    - skewness * sr_hat 
+    + ((raw_kurtosis - 1) / 4) * (sr_hat ** 2)
+)
+
+z_score = numerator / denominator
+psr = norm.cdf(z_score)
+print(f"PSR = {psr:.4f},if PSR > 0.95, then the strategy is effective")
+
+#最终的psr小于0.95，说明是不可信的，真实sr小于1
 
 
 '''
-15.4 UsingSnippet 15.5, compute P[p < p𝜃∗=1]forthestrategy described in exercise
+15.4 Using Snippet 15.5, compute P[p < p𝜃∗=1] for the strategy described in exercise
 3. At a significance level of 0.05, would you discard this strategy? Is this result
 consistent with PSR[𝜃∗]?
 '''
+import numpy as np,scipy.stats as ss
+def binHR(sl,pt,freq,tSR):
+    '''
+    Given a trading rule characterized by the parameters {sl,pt,freq},
+    what's the min precision p required to achieve a Sharpe ratio tSR?
+    1) Inputs
+    sl: stop loss threshold
+    pt: profit taking threshold
+    freq: number of bets per year
+    tSR: target annual Sharpe ratio
+    2) Output
+    p: the min precision rate p required to achieve tSR
+    '''
+    a=(freq+tSR**2)*(pt-sl)**2
+    b=(2*freq*sl-tSR**2*(pt-sl))*(pt-sl)
+    c=freq*sl**2
+    p=(-b+(b**2-4*a*c)**.5)/(2.*a)
+    return p
+
+def mixGaussians(mu1,mu2,sigma1,sigma2,prob1,nObs):
+    # Random draws from a mixture of gaussians
+    ret1=np.random.normal(mu1,sigma1,size=int(nObs*prob1))
+    ret2=np.random.normal(mu2,sigma2,size=int(nObs)-ret1.shape[0])
+    ret=np.append(ret1,ret2,axis=0)
+    np.random.shuffle(ret)
+    return ret
+def probFailure(ret,freq,tSR):
+    # Derive probability that strategy may fail
+    rPos,rNeg=ret[ret>0].mean(),ret[ret<=0].mean()
+    p=ret[ret>0].shape[0]/float(ret.shape[0])
+    thresP=binHR(rNeg,rPos,freq,tSR)
+    risk=ss.norm.cdf(thresP,p,p*(1-p)) # approximation to bootstrap
+    return risk
+def strategy_prob_failure():
+    #1) Parameters  按照题目给的参数输入
+    mu1,mu2,sigma1,sigma2,prob1,nObs=-0.10,0.06,0.12,0.03,.15,2600
+    tSR,freq=1.,24  
+    #2) Generate sample from mixture
+    ret=mixGaussians(mu1,mu2,sigma1,sigma2,prob1,nObs)
+    #3) Compute prob failure
+    probF=probFailure(ret,freq,tSR)
+    print(f'Prob strategy will fail {probF:.4f}')
+    return
+
+strategy_prob_failure()
+#Prob strategy will fail 0.1883  好像还行，当然，以0.05的置信度来说是超了，所以是不可信的
 
 '''
 15.5 In general, what result do you expect to be more accurate, PSR[𝜃∗] or
 P[p < p𝜃∗=1]? How are these two methods complementary?
 '''
 
+#P[p < p𝜃∗=1] 是模拟出来的结果，
+#PSR[𝜃∗] 是统计计算出来的，一般来说，我倾向于使用PSR[𝜃∗]。 且不依赖任何收益分布假设，上一个要依赖收益二元、高斯、独立
+#但是本质上是同一道题的不同解法。PSR[𝜃∗]需要完整的数据处理过程，处理复杂，而P[p < p𝜃∗=1]只需要止盈止损，频率，胜率，目标夏普比例即可。计算简单，解释方便，适合做汇报适合使用。
+#PSR[θ∗] 是过拟合概率的“黄金标准”，准确但昂贵；P[p < p_{θ∗}] 是它的“临床快检试剂盒”，稍有近似但极速、直观、可操作。二者不是竞争关系，而是“筛查 → 确诊”的经典医学式互补：用 P[p < p_{θ∗}] 快速识别高危策略，再用 PSR[θ∗] 对幸存者做最终病理确诊。
+#当然，都写成代码了，而且有完成的数据，肯定是使用PSR[𝜃∗] 
+
 '''
 15.6 Re-examine the results from Chapter 13, in light of what you have learned in
 this chapter.
-(a) Doestheasymmetrybetweenprofittakingandstop-lossthresholdsinOTRs
-make sense?
-(b) WhatistherangeofpimpliedbyFigure13.1,foradailybettingfrequency?
-(c) What is the range of p implied by Figure 13.5, for a weekly betting fre
-quency?
+(a) Does the asymmetry between profit taking and stop-loss thresholds in OTRs make sense?
+(b) What is the range of p implied by Figure 13.1,for a daily betting frequency?
+(c) What is the range of p implied by Figure 13.5, for a weekly betting frequency?
 
 '''
 
+#a OTR里面止盈止损不一致是对的，根据P[p < p𝜃∗=1]的计算，止盈止损不同程度，不同敏感度的影响着真实SR，所以这两个参数都要找到其最佳的范围，而不是要对称
+
+#b 这时止盈大约是1.5-2.0之间，止损是8.0-10之间，呈现出低止盈高止损的状态，这时的胜率p是相对比较大的，保底是大于0.5。从图上可以看出这个时候夏普是1.8左右。策略还是日频的，可以根据这些信息计算出胜率p值
+#懒得解数学公式了，使用模拟解决
+def TSR_withptsl(winRate,freq,pt,sl):
+    '''
+    在止盈止损不一样时，计算真实夏普比率
+    '''
+    return ( (pt-sl)*winRate+sl ) /( (pt-sl)*np.sqrt(winRate*(1-winRate)) ) * np.sqrt(freq)
+
+# 固定参数
+   
+freq = 252         # 年化频率（如日频）
+pt = 0.017
+sl = -0.09         # 止损（负数），例如 -2%
+target_sr = 3.5   # 目标夏普比率
+
+# 生成 pt 范围
+target_winRate = np.arange(0.4, 1, 0.0001)  # 注意：0.1001 确保包含 0.1
+
+# 存储最接近的结果
+best_winRate = None
+best_sr = None
+min_diff = np.inf
+
+for winRate in target_winRate:
+    sr = TSR_withptsl(winRate, freq, pt, sl)
+    if np.isnan(sr):
+        continue
+    diff = abs(sr - target_sr)
+    if diff < min_diff:
+        min_diff = diff
+        best_winRate = winRate
+        best_sr = sr
+
+# 输出结果
+print(f"目标夏普比率: {target_sr}")
+print(f"最优胜率 winRate: {best_winRate:.3f}")
+print(f"对应 TSR: {best_sr:.4f}")
+print(f"与目标的绝对误差: {min_diff:.6f}")
+
+#最优胜率 winRate: 0.906
+
+#c 这时止盈大约是1-3.5之间，止损是6.0-10之间，呈现出低止盈高止损的状态，这时的胜率p是更大了，比B时候还大。
 
 
+# 固定参数   
+freq = 52         # 年化频率（如日频）
+pt = 0.02
+sl = -0.095         # 止损（负数），例如 -2%
+target_sr = 0.09  # 目标夏普比率
 
+# 生成 pt 范围
+target_winRate = np.arange(0.4, 1, 0.0001)  # 注意：0.1001 确保包含 0.1
+
+# 存储最接近的结果
+best_winRate = None
+best_sr = None
+min_diff = np.inf
+
+for winRate in target_winRate:
+    sr = TSR_withptsl(winRate, freq, pt, sl)
+    if np.isnan(sr):
+        continue
+    diff = abs(sr - target_sr)
+    if diff < min_diff:
+        min_diff = diff
+        best_winRate = winRate
+        best_sr = sr
+
+# 输出结果
+print(f"目标夏普比率: {target_sr}")
+print(f"最优胜率 winRate: {best_winRate:.3f}")
+print(f"对应 TSR: {best_sr:.4f}")
+print(f"与目标的绝对误差: {min_diff:.6f}")
+
+#最优胜率 winRate: 0.831
 
 
 '''
