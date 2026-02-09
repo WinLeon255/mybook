@@ -3,6 +3,10 @@ import pandas as pd
 from scipy.stats import jarque_bera
 from statsmodels.tsa.stattools import adfuller
 import matplotlib.pyplot as plt
+import matplotlib
+# 配置中文字体支持
+matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'Noto Sans CJK JP', 'DejaVu Sans']
+matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 import statsmodels.stats.diagnostic as sm
 import statsmodels.api as smi
 import datetime as dt
@@ -6262,10 +6266,659 @@ print(f"与目标的绝对误差: {min_diff:.6f}")
 #%%
 #第十六章 机器学习资产配置
 
+'''
+16.1 Given the PnL series on N investment strategies:
+(a) Align them to the average frequency of their bets (e.g., weekly observations
+for strategies that trade on a weekly basis). Hint: Thiskindofdataalignment
+is sometimes called “downsampling.”
+(b) Compute the covariance of their returns, V.
+(c) Identify the hierarchical clusters among the N strategies.
+(d) Plot the clustered correlation matrix of the N strategies.
+'''
+#a 令n=10，生成日频pnl，然后降采样为周频
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ————————————————————————————————————————————————
+# 1) 参数设置（模拟真实策略多样性）
+# ————————————————————————————————————————————————
+np.random.seed(42)  # 可复现
+start_date = "2010-01-01"
+end_date   = "2025-12-31"
+freq       = "D"  # 日频
+N          = 10
+
+# 策略参数（每策略独立）：年化收益、波动率、自相关系数、胜率
+strategy_params = [
+    {"mu_ann": 0.08, "sigma_ann": 0.12, "rho": 0.1, "win_rate": 0.55},  # 稳健趋势
+    {"mu_ann": 0.12, "sigma_ann": 0.20, "rho": 0.3, "win_rate": 0.48},  # 高波动能
+    {"mu_ann": 0.05, "sigma_ann": 0.08, "rho": -0.05, "win_rate": 0.62}, # 低波逆向
+    {"mu_ann": 0.15, "sigma_ann": 0.25, "rho": 0.4, "win_rate": 0.42},  # 高风险套利
+    {"mu_ann": 0.03, "sigma_ann": 0.06, "rho": 0.0, "win_rate": 0.58},   # 现金增强
+    {"mu_ann": 0.10, "sigma_ann": 0.18, "rho": 0.25, "win_rate": 0.50}, # 多因子
+    {"mu_ann": 0.06, "sigma_ann": 0.10, "rho": 0.15, "win_rate": 0.57}, # 行业轮动
+    {"mu_ann": 0.09, "sigma_ann": 0.15, "rho": 0.2, "win_rate": 0.53},  # 波动率套利
+    {"mu_ann": 0.04, "sigma_ann": 0.07, "rho": -0.1, "win_rate": 0.65},  # 统计套利
+    {"mu_ann": 0.11, "sigma_ann": 0.22, "rho": 0.35, "win_rate": 0.46}, # 高频降频
+]
+
+# ————————————————————————————————————————————————
+# 2) 生成日频 PnL 序列（T × N）
+# ————————————————————————————————————————————————
+dates_daily = pd.date_range(start=start_date, end=end_date, freq=freq)
+T = len(dates_daily)
+
+# 初始化 PnL 矩阵（全零，后续累加）
+pnl_daily = np.zeros((T, N))
+
+for i in range(N):
+    params = strategy_params[i]
+    
+    # 日度参数（年化 → 日度）
+    mu_day = params["mu_ann"] / 252
+    sigma_day = params["sigma_ann"] / np.sqrt(252)
+    
+    # 生成带自相关的日度收益（AR(1)）
+    eps = np.random.normal(0, sigma_day, T)
+    ret = np.empty(T)
+    ret[0] = mu_day + eps[0]
+    for t in range(1, T):
+        ret[t] = mu_day + params["rho"] * (ret[t-1] - mu_day) + np.sqrt(1 - params["rho"]**2) * eps[t]
+    
+    # 调整胜率（可选：使正收益比例接近 win_rate）
+    if params["win_rate"] != 0.5:
+        # 简单偏移：调整均值使正收益占比达标（不影响波动率）
+        target_pos_frac = params["win_rate"]
+        current_pos_frac = np.mean(ret > 0)
+        if abs(current_pos_frac - target_pos_frac) > 0.05:
+            shift = np.percentile(ret, 50 + 100*(target_pos_frac - 0.5))
+            ret = ret - np.mean(ret) + shift
+    
+    # 累计 PnL（从0开始）
+    pnl_daily[:, i] = np.cumsum(ret)
+
+# 构建日频 DataFrame
+pnl_daily_df = pd.DataFrame(
+    pnl_daily,
+    index=dates_daily,
+    columns=[f"Strategy_{i+1}" for i in range(N)]
+)
+
+print("✅ 日频 PnL 生成完成：")
+print(f"  • 形状: {pnl_daily_df.shape} ({T} 天 × {N} 策略)")
+print(f"  • 时间范围: {pnl_daily_df.index[0]} 至 {pnl_daily_df.index[-1]}")
+print(f"  • 示例（前3行）:\n{pnl_daily_df.head(3)}\n")
+
+# ————————————————————————————————————————————————
+# 3) ✅ 降采样为周频（W-FRI，取每周最后一天的pnl）
+# ————————————————————————————————————————————————
+pnl_weekly_df = pnl_daily_df.resample("W-FRI").last()
+
+# 清理：删除全 NaN 的首尾行（如起始日非周五）
+pnl_weekly_df = pnl_weekly_df.dropna(how="all")
+
+print("✅ 已降采样为周频（W-FRI）:")
+print(f"  • 新形状: {pnl_weekly_df.shape} ({len(pnl_weekly_df)} 周)")
+print(f"  • 时间锚点: 所有日期均为周五（示例）: {pnl_weekly_df.index[:3].tolist()}")
+print(f"  • 示例（前3周增量 PnL）:\n{pnl_weekly_df.head(3)}\n")
+
+# ————————————————————————————————————————————————
+# 4) 验证：检查时间对齐是否正确（关键！）
+# ————————————————————————————————————————————————
+def verify_friday_alignment(df: pd.DataFrame) -> bool:
+    """验证 index 是否全为周五"""
+    is_friday = df.index.weekday == 4  # 4 = Friday
+    if is_friday.all():
+        print("✅ 验证通过：所有周频日期均为星期五。")
+        return True
+    else:
+        print("❌ 验证失败：存在非周五日期！")
+        print("问题日期:", df.index[~is_friday])
+        return False
+
+verify_friday_alignment(pnl_weekly_df)
+
+# ————————————————————————————————————————————————
+# 5) 可视化对比（日频 vs 周频）
+# ————————————————————————————————————————————————
+plt.figure(figsize=(12, 8))
+
+# 绘制 Strategy_1 的日频与周频
+s1_daily = pnl_daily_df["Strategy_1"].dropna()
+s1_weekly = pnl_weekly_df["Strategy_1"].dropna()
+
+plt.subplot(2, 1, 1)
+s1_daily.plot(title="Strategy_1：日频累计 PnL", alpha=0.8)
+plt.ylabel("累计 PnL")
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 1, 2)
+s1_weekly.plot(title="Strategy_1：周频累计 PnL（W-FRI）", style="-o", markersize=2)
+plt.ylabel("累计 PnL")
+plt.xlabel("日期")
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+#b   计算这N个策略的协方差
+# 1. 从累计 PnL 转换为周度收益（关键！）
+weekly_returns = pnl_weekly_df.diff().dropna()
+
+# 2. 计算协方差矩阵（pandas 自动处理中心化）
+cov_matrix = weekly_returns.cov()
+
+# 3. 查看结果
+print("✅ 10个策略的周频收益协方差矩阵 (Σ):")
+print(cov_matrix.round(6))  # 保留6位小数，便于阅读
+
+#c  对这些策略进行层级分类（聚类）
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from scipy.spatial.distance import squareform
+
+# ————————————————————————————————————————————————
+# 1) 获取周频收益（确保数据存在）
+# ————————————————————————————————————————————————
+weekly_returns = pnl_weekly_df.diff().dropna()
+
+# ————————————————————————————————————————————————
+# 2) 计算相关系数矩阵 C
+# ————————————————————————————————————————————————
+cov_matrix=weekly_returns.cov()
+corr_matrix = weekly_returns.corr()
+print("✅ 策略间相关系数矩阵:")
+print(corr_matrix.round(3))
+
+
+# 3) 将相关系数转换为距离矩阵 D   根据原书本的代码
+import scipy.cluster.hierarchy as sch
+corr=corr_matrix
+#将相关性转为距离远近
+dist=((1-corr)/2.)**.5 # distance matrix  与使用√[2*(1 - corr)]等价，计算出来的聚类分层完全一样，因为这里只是缩放了距离大小。不过这个源自课本的公式能够将dist结果标准化为【0,1】这个范围
+
+link=sch.linkage(dist,'single') # linkage matrix  执行层次聚类，将策略分层次聚合为不同集合
+
+#  绘制基础树状图
+plt.figure(figsize=(10, 6))
+# 绘制树状图，dendrogram函数返回一个字典，包含绘图信息
+dendro_info = sch.dendrogram(
+    link,
+    labels=weekly_returns.columns,          # 使用资产标签
+    leaf_rotation=45,             # 叶子标签旋转45度
+    leaf_font_size=10,            # 叶子标签字体大小
+    color_threshold=0.5,          # 颜色阈值，距离大于0.5的用不同颜色
+    above_threshold_color='gray'  # 阈值以上的连接线颜色
+)
+
+plt.title('Dendrogram - Single Linkage Clustering', fontsize=14, fontweight='bold')
+plt.xlabel('Assets', fontsize=12)
+plt.ylabel('Cluster Distance', fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.3, axis='y')  # 只在y轴添加网格线
+plt.tight_layout()
+plt.show()
+
+#热力图
+import seaborn as sns
+sns.heatmap(corr, annot=True, fmt=".2f", cmap='coolwarm', xticklabels=weekly_returns.columns, yticklabels=weekly_returns.columns)
+plt.title('Correlation Matrix Heatmap', fontsize=14, fontweight='bold')
+plt.show()
 
 
 
 
+'''
+16.2 Using the clustered covariance matrix V from exercise 1:
+(a) Compute the HRP allocations.
+(b) Compute the CLA allocations.
+(c) Compute the IVP allocations.
+'''
+#a 计算HRP分配
+#a.1 分层聚类
+import scipy.cluster.hierarchy as sch
+cob=cov_matrix
+corr=corr_matrix
+dist=((1-corr)/2.)**.5 # distance matrix 
+link=sch.linkage(dist,'single') # linkage matrix  执行层次聚类，将策略分层次聚合为不同集合
+
+#a.2 获取准对角排序
+def getQuasiDiag(link):
+    """
+    对层次聚类的链接矩阵（linkage matrix）进行准对角化排序（quasi-diagonalization）。
+    
+    该函数通过递归展开聚类树的叶子节点，得到一个资产/策略的重排序列表，
+    使得重排后的相关性矩阵呈现“块状对角”结构，便于后续如分层风险平价（HRP）等操作。
+    
+    参数
+    ----------
+    link : numpy.ndarray
+        来自 scipy.cluster.hierarchy.linkage 的链接矩阵，形状为 (n-1, 4)
+        
+    返回值
+    -------
+    list
+        按准对角顺序排列的原始资产索引列表（即叶节点的遍历顺序）
+    """
+    # 复制链接矩阵以避免修改原始数据
+    link = link.copy()
+    
+    # 原始资产总数（链接矩阵最后一行第4列）
+    n_items = int(link[-1, 3])
+    
+    # 从最后一次合并开始：包含两个根子树的索引
+    sort_ix = pd.Series([int(link[-1, 0]), int(link[-1, 1])])
+    
+    # 循环展开所有非叶节点（即索引 >= n_items 的簇）
+    while sort_ix.max() >= n_items:
+        # 将当前索引间隔拉大一倍（为插入新元素预留空间）
+        sort_ix.index = range(0, len(sort_ix) * 2, 2)
+        
+        # 找出所有代表“簇”（非原始资产）的项
+        cluster_mask = sort_ix >= n_items
+        df0 = sort_ix[cluster_mask]
+        
+        # 如果没有簇了，跳出循环（理论上不会发生，但安全起见）
+        if df0.empty:
+            break
+        
+        # 获取这些簇在链接矩阵中的行号（需减去 n_items）
+        idx_positions = df0.index                    # 当前 Series 中的位置
+        cluster_indices = (df0 - n_items).astype(int)  # 对应 link 矩阵的行索引
+        
+        # 从链接矩阵中取出每个簇的两个子节点
+        left_children = link[cluster_indices, 0].astype(int)   # 左子节点
+        right_children = link[cluster_indices, 1].astype(int)  # 右子节点
+        
+        # 用左子节点替换原位置的簇编号
+        sort_ix.loc[idx_positions] = left_children
+        
+        # 在紧邻的下一个位置插入右子节点
+        right_series = pd.Series(right_children, index=idx_positions + 1)
+        
+        # 使用 pd.concat 替代已弃用的 .append()
+        sort_ix = pd.concat([sort_ix, right_series])
+        
+        # 按索引排序，恢复顺序
+        sort_ix = sort_ix.sort_index()
+        
+        # 重置索引为连续整数：0, 1, 2, ...
+        sort_ix.index = range(len(sort_ix))
+    
+    # 确保返回的是整数列表
+    return sort_ix.astype(int).tolist()
+
+
+sorted_indices = getQuasiDiag(link)
+sorted_indices=corr.index[sorted_indices].tolist() #恢复label
+print("Quasi-diagonal order:", sorted_indices)
+
+#原python2版本
+# def getQuasiDiag(link):
+# # Sort clustered items by distance
+#     link=link.astype(int)
+#     sortIx=pd.Series([link[-1,0],link[-1,1]])
+#     numItems=link[-1,3] # number of original items
+#     while sortIx.max()>=numItems:
+#         sortIx.index=range(0,sortIx.shape[0]*2,2) # make space
+#         df0=sortIx[sortIx>=numItems] # find clusters
+#         i=df0.index;j=df0.values-numItems
+#         sortIx[i]=link[j,0] # item 1
+#         df0=pd.Series(link[j,1],index=i+1)
+#         sortIx =sortIx.append(df0) # item 2
+#         sortIx=sortIx.sort_index() # re-sort
+#         sortIx.index=range(sortIx.shape[0]) # re-index
+#     return sortIx.tolist()
+
+#a.3 计算递归二分权重
+def getRecBipart(cov, sortIx):
+    """
+    基于准对角排序后的资产顺序，递归二分计算分层风险平价（HRP）权重。
+    
+    该函数从顶层聚类开始，逐层将每个簇二分为左右子簇，
+    并根据子簇的风险（方差）反比分配权重，实现“高风险少配，低风险多配”。
+    
+    参数
+    ----------
+    cov : pandas.DataFrame
+        资产收益率的协方差矩阵，索引和列均为资产名称或编号
+    sortIx : list
+        经过准对角化排序后的资产索引列表（如 [3, 1, 4, 0, 2]）
+        
+    返回值
+    -------
+    w : pandas.Series
+        每个资产的 HRP 权重，索引为原始资产标识
+    """
+
+    
+    # 初始化：所有资产权重设为 1（后续通过乘法逐步缩放）
+    w = pd.Series(1.0, index=sortIx)
+    
+    # 初始时，所有资产在一个簇中
+    cItems = [sortIx]
+    
+    # 只要还有可分割的簇，就继续二分
+    while len(cItems) > 0:
+        # 对每个簇进行二等分（仅当簇长度 > 1 时）
+        # 例如 [A,B,C,D] → [A,B] 和 [C,D]
+        cItems = [
+            i[j:k] 
+            for i in cItems 
+            for j, k in ((0, len(i) // 2), (len(i) // 2, len(i))) 
+            if len(i) > 1
+        ]
+        
+       
+        # 成对处理相邻的两个子簇（左子簇和右子簇）
+        for i in range(0, len(cItems), 2):
+            cItems0 = cItems[i]     # 左子簇
+            cItems1 = cItems[i + 1] # 右子簇
+            
+            # 计算两个子簇的“组合风险”（即簇内资产按等权组合的方差）
+            cVar0 = getClusterVar(cov, cItems0)
+            cVar1 = getClusterVar(cov, cItems1)
+            
+            # 根据风险反比分配权重：
+            # 风险越高的簇，分配的权重越小
+            alpha = 1 - cVar0 / (cVar0 + cVar1)  # 分配给左簇的比例
+            
+            # 将当前权重乘以分配比例（递归缩放）
+            w[cItems0] *= alpha      # 左子簇权重缩放
+            w[cItems1] *= (1 - alpha)  # 右子簇权重缩放
+    
+    return w
+
+def getIVP(cov,**kargs):
+# Compute the inverse-variance portfolio
+    ivp=1./np.diag(cov)
+    ivp/=ivp.sum()
+    return ivp
+def getClusterVar(cov,cItems):
+# Compute variance per cluster
+    cov_=cov.loc[cItems,cItems] # matrix slice
+    w_=getIVP(cov_).reshape(-1,1)
+    cVar=np.dot(np.dot(w_.T,cov_),w_)[0,0]
+    return cVar
+
+HRP_weights = getRecBipart(cov_matrix, sorted_indices)
+print("HRP配置:", HRP_weights)
+
+#b 计算CLA分配  使用PyPortfolioOpt 库进行 这个库也实现了HRP
+from scipy.cluster.hierarchy import dendrogram, linkage
+from pypfopt import expected_returns, risk_models
+from pypfopt.cla import CLA
+from pypfopt.hierarchical_portfolio import HRPOpt
+def calculate_portfolio_performance(weights, expected_returns_vec, cov_matrix, risk_free_rate=0.02):
+    """
+    计算投资组合绩效指标
+    """
+    # 确保权重是NumPy数组
+    if isinstance(weights, dict):
+        weights = np.array(list(weights.values()))
+    elif isinstance(weights, list):
+        weights = np.array(weights)
+    
+    # 确保预期收益是NumPy数组
+    if isinstance(expected_returns_vec, pd.Series):
+        expected_returns_vec = expected_returns_vec.values
+    
+    # 计算组合收益和风险
+    portfolio_return = np.dot(weights, expected_returns_vec)
+    
+    # 计算组合方差
+    portfolio_variance = weights @ cov_matrix @ weights
+    portfolio_risk = np.sqrt(portfolio_variance)
+    
+    if portfolio_risk > 1e-10:
+        sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_risk
+    else:
+        sharpe_ratio = 0
+    
+    # 计算风险贡献度
+    if portfolio_risk > 1e-10:
+        marginal_risk = cov_matrix @ weights / portfolio_risk
+        risk_contribution = weights * marginal_risk
+        risk_contribution_pct = risk_contribution / portfolio_risk
+    else:
+        risk_contribution_pct = np.zeros_like(weights)
+    
+    return {
+        'return': portfolio_return,
+        'risk': portfolio_risk,
+        'sharpe': sharpe_ratio,
+        'weights': weights,
+        'risk_contribution': risk_contribution_pct
+    }
+
+def run_cla_optimization_from_returns(returns, weight_bounds=(0, 1)):
+    """
+    使用CLA算法进行投资组合优化 - 直接从收益率数据
+    """
+    # 计算预期收益和协方差
+    mu = expected_returns.mean_historical_return(returns,returns_data=True)
+    sigma = risk_models.sample_cov(returns,returns_data=True)
+    
+    # 确保sigma是NumPy数组
+    sigma_array = sigma.values if isinstance(sigma, pd.DataFrame) else sigma
+    
+    try:
+        # 初始化CLA对象
+        cla = CLA(mu, sigma_array, weight_bounds=weight_bounds)
+        
+        # 计算最小方差组合
+        min_vol_weights = cla.min_volatility()
+        
+        # 计算最大夏普组合
+        max_sharpe_weights = cla.max_sharpe()
+        
+        # 获取有效前沿
+        frontier_points = 100
+        mu_list, sigma_list, _ = cla.efficient_frontier(points=frontier_points)
+        
+        # 计算绩效
+        min_vol_perf = calculate_portfolio_performance(min_vol_weights, mu.values, sigma_array)
+        max_sharpe_perf = calculate_portfolio_performance(max_sharpe_weights, mu.values, sigma_array)
+        
+        return {
+            'model': cla,
+            'min_vol': {'weights': min_vol_weights, 'performance': min_vol_perf},
+            'max_sharpe': {'weights': max_sharpe_weights, 'performance': max_sharpe_perf},
+            'frontier': {'returns': mu_list, 'risks': sigma_list},
+            'mu': mu,
+            'sigma': sigma_array
+        }
+    except Exception as e:
+        print(f"CLA优化失败: {e}")
+        # 返回一个简化结果用于继续执行
+        return {
+            'model': None,
+            'min_vol': {'weights': {}, 'performance': {'return': 0, 'risk': 0, 'sharpe': 0, 'weights': [], 'risk_contribution': []}},
+            'max_sharpe': {'weights': {}, 'performance': {'return': 0, 'risk': 0, 'sharpe': 0, 'weights': [], 'risk_contribution': []}},
+            'frontier': {'returns': [], 'risks': []},
+            'mu': mu,
+            'sigma': sigma_array
+        }
+
+def run_hrp_optimization_from_returns(returns):
+    """
+    使用HRP算法进行投资组合优化 - 直接从收益率数据
+    """
+    try:
+        # 确保收益率数据没有NaN值
+        returns = returns.dropna() if returns.isnull().any().any() else returns
+        
+        # 初始化HRP优化器
+        hrp = HRPOpt(returns)
+        
+        # 运行优化
+        hrp_weights = hrp.optimize()
+        
+        # 获取聚类信息
+        corr_matrix = returns.corr()
+        # 将相关矩阵转换为距离矩阵
+        dist_matrix = np.sqrt((1 - corr_matrix) / 2)
+        link_matrix = linkage(dist_matrix, method='single')
+        
+        # 获取排序索引
+        ordered_indices = list(range(len(returns.columns)))
+        
+        # 计算预期收益和协方差
+        mu = expected_returns.mean_historical_return(returns,returns_data=True)
+        sigma = risk_models.sample_cov(returns,returns_data=True)
+        sigma_array = sigma.values if isinstance(sigma, pd.DataFrame) else sigma
+        
+        # 计算绩效
+        hrp_perf = calculate_portfolio_performance(hrp_weights, mu.values, sigma_array)
+        
+        return {
+            'model': hrp,
+            'weights': hrp_weights,
+            'performance': hrp_perf,
+            'linkage_matrix': link_matrix,
+            'ordered_indices': ordered_indices,
+            'asset_names': list(returns.columns)
+        }
+    except Exception as e:
+        print(f"HRP优化失败: {e}")
+        # 返回一个简化结果
+        return {
+            'model': None,
+            'weights': {},
+            'performance': {'return': 0, 'risk': 0, 'sharpe': 0, 'weights': [], 'risk_contribution': []},
+            'linkage_matrix': np.array([]),
+            'ordered_indices': [],
+            'asset_names': list(returns.columns) if hasattr(returns, 'columns') else []
+        }
+    
+returns_simple = pnl_weekly_df.diff()
+returns_simple.iloc[0] = pnl_weekly_df.iloc[0]  # 第一天的收益率就是第一天的累计收益
+returns=returns_simple
+
+hrpv2=run_hrp_optimization_from_returns(returns)
+cla=run_cla_optimization_from_returns(returns)
+#书本源代码
+# def getCLA(cov,**kargs):
+#     # Compute CLA's minimum variance portfolio
+#     mean=np.arange(cov.shape[0]).reshape(-1,1) # Not used by C portf
+#     lB=np.zeros(mean.shape)
+#     uB=np.ones(mean.shape)
+#     cla=CLA.CLA(mean,cov,lB,uB)
+#     cla.solve()
+#     return cla.w[-1].flatten()
+# CLA_weights = getCLA(cov_matrix)
+#恢复label
+# CLA_weights=pd.Series(CLA_weights,index=cov_matrix.index)
+print("CLA配置:", cla['min_vol']['weights'])
+
+#c 计算IVP分配
+IVP_weights = getIVP(cov_matrix)
+#恢复label
+IVP_weights=pd.Series(IVP_weights,index=cov_matrix.index)
+print("IVP配置:", IVP_weights)
+
+'''
+16.3 Using the covariance matrix V from exercise 1:
+(a) Perform a spectral decomposition: VW = WΛ.
+(b) Form an array 𝜀 by drawing N random numbers from a U[0,1] distribution.
+(c) Form an NxN matrix ̃ Λ, where ̃ Λn,n = N𝜀nΛn,n(∑N
+n=1 𝜀n)−1, n = 1,…,N.
+(d) Compute ̃ V = W ̃ ΛW−1.
+(e) Repeat exercise 2, this time using ̃ V as covariance matrix. What allocation method has been most impacted by the re-scaling of spectral variances?
+'''
+
+#a 求解W
+cov_matrix=cov_matrix
+# 谱分解：使用 eigh（因为协方差矩阵是对称的）
+eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+
+# 注意：eigh 返回的特征值是升序排列（从小到大）
+# 通常我们希望从大到小（主成分方向），所以反转顺序
+idx = eigenvalues.argsort()[::-1]   # 从大到小排序的索引
+eigenvalues = eigenvalues[idx]
+eigenvectors = eigenvectors[:, idx]
+
+# 验证分解是否正确：V ≈ W @ Λ @ W.T
+Lambda = np.diag(eigenvalues)
+reconstructed = eigenvectors @ Lambda @ eigenvectors.T
+
+# 检查误差
+print("最大重构误差:", np.max(np.abs(cov_matrix - reconstructed)))
+# 应该非常小（如 < 1e-12）
+
+# 输出结果
+print("特征值 (Λ 对角线):", eigenvalues)
+print("特征向量矩阵 W (列向量):\n", eigenvectors)
+
+#b 从U[0,1] 分布里面随机生成N个
+N = 5  # 你可以替换为你需要的任意正整数
+epsilon = np.random.uniform(low=0.0, high=1.0, size=N)
+
+# 或者更简洁地（因为 uniform 默认就是 [0,1)）：
+epsilon = np.random.rand(N)
+
+print(epsilon[:10])  # 打印前10个数示例
+
+#c d e 作为纯数学部分，先跳过，不深入研究。 这里能够得出结论，hrp对协方差矩阵的变化敏感性较低，而CLA的敏感性较大。所以实际的资产配置中，不怎么使用cla方法
+
+'''
+16.4 How would you modify the HRP algorithm to produce allocations that add up
+to 0, where |wn| ≤ 1, ∀n = 1,…,N?
+'''
+
+#只修改第三步：二分法部分即可
+#也有应用：统计套利、因子中性组合（如行业中性、风格中性）、多空量化策略。这样可以使多空的暴露的风险相当
+def getRecBipart_market_neutral(cov, sortIx):
+    w = pd.Series(0.0, index=sortIx)  # 初始化为0
+    cItems = [sortIx]
+    
+    while len(cItems) > 0:
+        # 二分所有簇
+        cItems = [
+            i[j:k] for i in cItems 
+            for j, k in ((0, len(i)//2), (len(i)//2, len(i))) 
+            if len(i) > 1
+        ]
+        if len(cItems) == 0:
+            break
+        
+        for i in range(0, len(cItems), 2):
+            left = cItems[i]
+            right = cItems[i+1]
+            
+            var_left = getClusterVar(cov, left)
+            var_right = getClusterVar(cov, right)
+            
+            # 风险越高的簇，分配的绝对权重越小
+            sigma_left = np.sqrt(var_left)
+            sigma_right = np.sqrt(var_right)
+            
+            total_sigma = sigma_left + sigma_right
+            weight_left = sigma_right / total_sigma   # 高风险 → 小权重
+            weight_right = -sigma_left / total_sigma  # 符号相反
+            
+            # 累加到现有权重（初始为0）
+            w[left] += weight_left
+            w[right] += weight_right
+    
+    # 可选：归一化总暴露（例如限制 sum(|w|) = 2）
+    total_exposure = w.abs().sum()
+    if total_exposure > 0:
+        w = w * (2.0 / total_exposure)  # 使总多空各为1，合计暴露=2
+    
+    return w
+
+
+'''
+16.5 Can you think of an easy way to incorporate expected returns in the HRP
+allocations?
+'''
+
+#hrp是只利用协方差矩阵，纯风险驱动的配置方法，不利用预期收益。所以要融入预期收益信息才行
+#1.在聚类计算距离的时候引入预期收益信息
+#2.在分配权重阶段加入收益倾斜。先按标准 HRP 得到初始权重，然后在满足一定约束（如总和为1、无卖空等）下，对权重做小幅调整，使其更偏向高预期收益的资产。就可以构建一个二次规划求解。max（权重*预期收益-偏离程度*（权重-hrp权重）**2） s.t 权重都大于0，和为1
 
 
 '''
@@ -6274,4 +6927,27 @@ print(f"与目标的绝对误差: {min_diff:.6f}")
 2.HRP算法分三个阶段运行：树聚类、准对角化和递归二分。书中给出了数学推导过程和可能的提升方式。但是完全没看懂。。。。。 先照着书里面的做法用起来吧，后面要改进再说。
 3.模拟实验验证。书中是设计了模拟实验，10个高斯分布的收益序列数据，计算CLA、hrp，ivp及其样本外结果，100000次模拟，发现样本外数据𝜎2CLA =0.1157, 𝜎2IVP = 0.0928, and 𝜎2HRP = 0.0671，HRP方差显著要小，而小于的比例很高。充分考虑了资产分配的多元化和相关性。
 4.应用范围。先定资产，再选择资产下的策略。更稳健的选择是构建一个总资产账户，然后衍生出不同的资产类别（A股，期货，债券等），然后资产类别下面是衍生的策略。使用hrp是对整个资产账户进行的配置，当然，单独应用于某个资产类别也没有问题
+5.聚类分类的方法有挺多，比如['single', 'complete', 'average', 'ward']，甚至双聚类，在书中选择了'single'链接方法，这样的单连接法能放大分散化效果，即使在大类资产相关性都为0.9+时，它仍能识别出其中相对最低的相关性（例如0.91 vs 0.95），从而强制性地保留一些树状结构。这种结构使得递归二分得以进行，从而在系统层面强制保留了一定程度的分散化。从而在样本外具有最强的鲁棒性。
+6.可以使用现成的库pypfopt 计算hrp，cla。hrp经过对比，结果差不多。 见hrp现成库实现对比.py
+
+拓展：
+1.还有其他类似HRP进行资产配置的方法：a. Black-Litterman（主观观点，贝叶斯先验），  b. 因子风险预算（barra因子分解模型），但是最使用机器学习，能够跨资产进行的还是使用HRP。这个方法已经是业界前沿了。
+2.hrp算法的每一步都可以修改，然后获取提升。比如树聚类可以选择其他聚类方法，但是最好使用回测，模拟等进行样本外的验证，才能确定是否提升。书中有给出hrp和cla、ivp的模拟实验代码，可以直接抄。用于优化hrp
+3.比如在第三步二项规划的时候，书中是按照风险评价进行的，也可以在这一步使用CLA方案进行。
+4.基于HRP上有更多升级，而且是有现成的库。Riskfolio-Lib 这个库实现了层级风险平价（HRP），层级均等风险贡献（HERC），嵌套聚类优化（NCO）。由于hrp虽然是比等权中分配更好的风险分配方式，但是更加的偏好低风险，作为个人选手，肯定要选择更激进一点的配置方案。————有明确的收益或风险观点，并希望将其分层实施，选NCO。后续就算是搞模拟实验，也是在这三者上进行，然后选择。
+'''
+
+#%%
+#第十七章 结构性断裂    这一章内容来到因子特征方面
+
+
+
+
+
+
+
+
+'''
+第十七章：
+
 '''
