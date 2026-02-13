@@ -6940,6 +6940,279 @@ allocations?
 #%%
 #第十七章 结构性断裂    这一章内容来到因子特征方面
 
+'''
+17.1 On a dollar bar series on E-mini S&P 500 futures,
+(a) Apply the Brown-Durbin-Evans method. Does it recognize the dot-com
+bubble?
+(b) Apply the Chu-Stinchcombe-White method. Does it find a bubble in 2007
+2008?
+'''
+
+#只执行chu-stinchcombe-white方法 
+#使用已有的一个库
+from mizarlabs.structural_breaks.cusum_chu_stinchcome_white import ChuStinchcombeWhiteStatTest
+import pandas as pd
+import baostock as bs
+
+lg = bs.login()
+
+stock_code = "sz.002460"  # 股票代码，格式为 "市场.代码"，例如 sh.600000 (浦发银行) 赣锋锂业sz.002460
+start_date = "2016-01-06" # 开始日期，格式 YYYY-MM-DD
+end_date = "2025-01-06"   # 结束日期，格式 YYYY-MM-DD (可以是同一天获取当天数据)
+frequency = "5"           # 数据频率：'d' for day, 'w' for week, 'm' for month, '5' for 5min, '15' for 15min, '30' for 30min, '60' for 60min
+adjustflag = "2"          # 复权标志：'3' for 不复权, '2' for 后复权, '1' for 前复权
+
+# 2. 调用查询函数
+rs = bs.query_history_k_data_plus(stock_code,
+                                  "date,time,code,open,high,low,close,volume,amount,adjustflag", # 指定要查询的字段
+                                  start_date=start_date,
+                                  end_date=end_date,
+                                  frequency=frequency,
+                                  adjustflag=adjustflag)
+
+if rs.error_code != '0':
+    print(f"Query failed. Error code: {rs.error_code}, Error message: {rs.error_msg}")
+else:
+    print("Query succeeded. Fetching data...")
+
+ # 4. 循环读取数据并存入列表
+data_list = []
+while (rs.error_code == '0') & rs.next():
+    data_list.append(rs.get_row_data())
+
+# 5. 将列表转换为 pandas DataFrame
+result = pd.DataFrame(data_list, columns=rs.fields)
+
+#time 的格式转换。20250106133500000转为 2025-01-06 13：35：00 000 年月日 时分秒格式
+result['time']=pd.to_datetime(result['time'], format='%Y%m%d%H%M%S%f')
+
+bs.logout()
+
+#resample data
+def dd_bars(data: pd.DataFrame, m: int = None):
+    '''
+    params: data => dataframe of close series
+    params: column => column of data sample; vol, dollar etc  累计阈值门槛，达到就重采样
+    '''    
+    ts, idx = 0, []
+    for i, x in enumerate(data):
+        ts += x
+        if ts >= m:
+            ts = 0; idx.append(i)
+            continue
+    return data.iloc[idx]
+
+#转数字  因为amount是字符串，需要转换为数字
+result['amount']=pd.to_numeric(result['amount'], errors='ignore')
+#time 设为索引
+result.set_index('time', inplace=True)
+
+#计算有多少个交易日 将总金额平均到交易日级别
+days=result['date'].nunique()
+total_amount=result['amount'].sum()
+avg_amount_per_day=total_amount/days
+result_dollar_bars=dd_bars(result['amount'], avg_amount_per_day)
+result_dollar_bars=pd.DataFrame(result_dollar_bars)
+
+result_dollar_bars['close']=result['close'].reindex(result_dollar_bars.index)
+result_dollar_bars['close']=pd.to_numeric(result_dollar_bars['close'], errors='ignore')
+result_dollar_bars['close_log']=np.log(result_dollar_bars['close'])
+result_dollar_bars['return']=result_dollar_bars['close_log'].diff()
+
+#稳定性检验，检验数据是否平稳。CSW检验要求数据是平稳的
+from statsmodels.tsa.stattools import adfuller
+adf_result = adfuller(result_dollar_bars['return'].dropna())
+print('ADF Statistic:', adf_result[0])
+print('p-value:', adf_result[1])
+print('Critical Values:')
+for key, value in adf_result[4].items():
+    print(f'   {key}: {value}')
+
+
+# 从结果图来看还是能够识别到一定的波峰波谷的，准确率不错，但是召回率不是很高，容易错过很多。
+#应该有一套自适应计算窗口期和对应的临界值调整因子的机制，因为默认5%置信水平是4.6，但是实际中改变了窗口就需要改变。—————— 这个观点来自ai
+#对课文的理解是使用多个固定窗口进行滚动，然后对同一个t时刻，选择不同窗口中最大的一个统计值作为该时刻的统计值。临界值c_α[t] = √(b_α + log(t-n))保持不变，不与窗口大小相关。n是起始时间。 ———————— 这个观点来自AFML
+#from mizarlabs.structural_breaks.cusum_chu_stinchcome_white import ChuStinchcombeWhiteStatTest 这里已经是afml优化后的结果了，直接使用就行，将Critical Values*0.95，降低一点阈值，可以得到更广的覆盖面，但是准确率下降
+
+# side_test 可选：'one_sided_positive', 'one_sided_negative', 'two_sided'
+csw_test_positive = ChuStinchcombeWhiteStatTest(side_test='one_sided_positive')
+csw_test_negative = ChuStinchcombeWhiteStatTest(side_test='one_sided_negative')
+#  运行检验
+result_df_positive = csw_test_positive.run(result_dollar_bars['return'].dropna())
+result_df_negative = csw_test_negative.run(result_dollar_bars['return'].dropna())
+
+#判断：如果某个时点的检验统计量超过临界值，则发出结构突变信号
+signals_positive = result_df_positive['statistic'] > result_df_positive['critical_value']*0.98
+signals_negative = result_df_negative['statistic'] > result_df_negative['critical_value']*0.98
+break_points_positive = signals_positive[signals_positive].index
+break_points_negative = signals_negative[signals_negative].index
+print(f"检测到的结构突变点位于：{list(break_points_positive)}")
+print(f"检测到的结构突变点位于：{list(break_points_negative)}")
+
+#画图 close 和突变点 散点要在曲线的上方
+plt.figure(figsize=(12, 6))
+plt.plot(result_dollar_bars.index, result_dollar_bars['close'], label='Close Price', zorder=1)
+plt.scatter(break_points_positive, result_dollar_bars.loc[break_points_positive, 'close'], marker='^', color='g', label='Positive Break Point', s=50, zorder=5)
+plt.scatter(break_points_negative, result_dollar_bars.loc[break_points_negative, 'close'], marker='v', color='r', label='Negative Break Point', s=50, zorder=5)
+plt.title('Close Price with Detected Break Points')
+plt.xlabel('Date')
+plt.ylabel('Close Price')
+plt.legend()
+plt.show()
+
+
+'''
+17.2 On a dollar bar series on E-mini S&P 500 futures,
+(a) Compute the SDFC (Chow-type) explosiveness test. What break date does
+this method select? Is this what you expected?
+(b) Compute and plot the SADF values for this series. Do you observe extreme
+spikes around the dot-com bubble and before the Great Recession? Did the
+bursts also cause spikes?
+'''
+
+
+'''
+17.3 Following on exercise 2,
+(a) Determine the periods where the series exhibited
+(i) Steady conditions
+(ii) Unit-Root conditions
+(iii) Explosive conditions
+(b) Compute QADF.
+(c) Compute CADF.
+'''
+
+'''
+17.4 On a dollar bar series on E-mini S&P 500 futures,
+(a) Compute SMT for SM-Poly1 and SM-Poly 2, where 𝜑 = 1. What is their
+correlation?
+(b) Compute SMTforSM-Exp,where 𝜑 = 1and𝜑 = 0.5.Whatistheircorre
+lation?
+(c) Compute SMTforSM-Power,where𝜑 = 1and𝜑 = 0.5.Whatistheircor
+relation?
+'''
+
+'''
+17.5 If you compute the reciprocal of each price, the series {y−1
+bursts and bursts into bubbles.
+(a) Is this transformation needed, to identify bursts?
+(b) What methods in this chapter can identify bursts without requiring this
+transformation?
+'''
+
+#SADF与SMT检验。主要，这些检验部要求数据平稳，直接对cusum类检验的数据继续进行即可。只需要注意传入的数据要符合传入的模型要求。
+#这里给出的SADF与SMT检验都只是对单泡沫进行检验，如果需要对多泡沫检验可以改为滑动窗口或者gsadf检验
+'''
+model 参数	检验类型	应使用的数据列	计量经济学含义
+'no_trend'	标准SADF检验	result_dollar_bars['return']	在无趋势假设下，收益率是否出现爆炸性增长（泡沫）。
+'linear'	标准SADF检验	result_dollar_bars['return']	在包含线性趋势的假设下，检验收益率序列的爆炸性。
+'quadratic'	标准SADF检验	result_dollar_bars['return']	在包含二次趋势的假设下，检验收益率序列的爆炸性。
+'sm_poly_1'	子和超鞅检验	result_dollar_bars['close']	检验价格本身是否呈现多项式趋势的爆炸性增长。
+'sm_poly_2'	子和超鞅检验	result_dollar_bars['close_log']	检验价格对数是否呈现另一种多项式趋势的爆炸性增长。
+'sm_exp'	子和超鞅检验	result_dollar_bars['close_log']	检验价格对数是否呈现指数趋势的爆炸性增长。
+'sm_power'	子和超鞅检验	result_dollar_bars['close_log']	检验价格对数是否呈现幂律趋势的爆炸性增长。
+'''
+from mizarlabs.structural_breaks.sadf import SupremumAugmentedDickeyFullerStatTest
+
+from statsmodels.tsa.stattools import adfuller
+# 使用ADF检验辅助确定lags
+result = adfuller(result_dollar_bars['return'].dropna(), autolag='AIC')
+print(f"建议的滞后阶数 (基于AIC): {result[2]}")
+
+# 示例1: 使用标准SADF检验 (model='linear') 检验收益率序列
+sadf_linear = SupremumAugmentedDickeyFullerStatTest(
+    model='linear',
+    lags=1,        # 关键参数：需足够消除自相关，可通过AIC/BIC选择
+    min_length=50,  
+    phi=1,       # 惩罚系数，只对smt方法有效
+    add_constant=True
+)
+# 注意：传入的数据是收益率（一阶差分序列）
+sadf_results = sadf_linear.run(np.log(result_dollar_bars['close']).dropna())
+
+# 示例2: 使用子和超鞅检验 (model='sm_exp') 检验价格对数序列
+smt_exp = SupremumAugmentedDickeyFullerStatTest(
+    model='sm_exp',
+    lags=1,        # 子和超鞅检验对lags相对不敏感，通常设为1或0
+    min_length=50,
+    add_constant=True,
+    phi=0.5         # 惩罚系数，调节对长窗口泡沫的敏感度，常用0.5或1.0
+)
+# 注意：传入的数据是价格的对数（水平序列）
+smt_results = smt_exp.run(result_dollar_bars['close_log'].dropna())
+
+#补充 使用蒙特卡洛模拟 SADF 临界值，这样才知道原数据列是否显著
+def simulate_sadf_critical_values(n_obs, min_length, lags=1, n_simulations=1000, seed=42):
+    """
+    蒙特卡洛模拟 SADF 临界值
+    在原假设下（随机游走），模拟 SADF 统计量的分布
+    """
+    np.random.seed(seed)
+    max_sadf_stats = []
+    
+    for _ in range(n_simulations):
+        # 原假设：随机游走（无漂移）
+        random_walk = np.cumsum(np.random.randn(n_obs))
+        series = pd.Series(random_walk)
+        
+        sadf_test = SupremumAugmentedDickeyFullerStatTest(
+            model='linear',
+            lags=lags,
+            min_length=min_length,
+            phi=1,
+            add_constant=True
+        )
+        sadf_series = sadf_test.run(series)
+        max_sadf_stats.append(sadf_series.max())
+    
+    max_sadf_stats = np.array(max_sadf_stats)
+    
+    critical_values = {
+        '90%': np.percentile(max_sadf_stats, 90),
+        '95%': np.percentile(max_sadf_stats, 95),
+        '99%': np.percentile(max_sadf_stats, 99),
+    }
+    return critical_values, max_sadf_stats
+
+# 使用示例
+n_obs = len(result_dollar_bars['return'].dropna())
+cv, simulated = simulate_sadf_critical_values(n_obs, min_length=50, lags=1, n_simulations=1000)
+
+print("蒙特卡洛临界值:")
+for level, value in cv.items():
+    print(f"  {level}: {value:.4f}")
+
+sadf_stat = sadf_results.max()
+print(f"\n实际 SADF 统计量: {sadf_stat:.4f}")
+
+# 判断
+if sadf_stat > cv['95%']:
+    print("→ 在 5% 显著性水平下拒绝原假设，存在泡沫证据")
+else:
+    print("→ 无法拒绝原假设，未发现泡沫证据")
+
+
+'''
+第十七章总结：
+1.本章介绍了多个检验方法，包括Brown-Durbin-Evans方法、Chu-Stinchcombe-White方法、SDFC方法、SADF方法、QADF方法、CADF方法、SMT方法等。用于检验指定品种是否处于爆炸性的增加和崩溃状态中，即检测持续的、加速的爆炸性增长（泡沫）。这样的方法对于查找市场中的趋势特别有用，由于追赶暴涨暴跌的策略、etf轮动、多市场寻找机会都很好用。
+2.这些检验方法被分成了两类：a、cusum类检测，检查标的是否明显偏差于白噪音，（Brown-Durbin-Evans方法、Chu-Stinchcombe-White方法）。b、爆炸性检测。检测是否表现出爆炸性的增长和崩溃，即检测持续的、加速的爆炸性增长（泡沫）。（SDFC方法、SADF方法、QADF方法、CADF方法、SMT方法等）。所以需要ab类检查都通过了，才可以有比较高的置信度说明存在持续的暴涨/暴跌。
+3.目前这些检测方法或多或少都会有一些缺陷，依赖于启动周期，或者计算量爆炸等问题。
+4.对于cusum类检测，Brown-Durbin-Evans方法依赖于起始点，而且依赖于回归建模是否正确，而Chu-Stinchcombe-White方法不依赖于起始点，而且不依赖于数据分布，不依赖于特定的回归模型，而且计算简单一些。使用AFML里面改进过的Chu-Stinchcombe-White方法，能够更好的识别出偏离的异常值。CSW方法需要数据是平稳的，这是仅有的前提了，数据量要连续，不要有很多缺失值，样本量应该大于100.
+5.本章内容大部分都可以使用mizarlabs 实现，有现成的库。库里有Chu-Stinchcombe-White方法和SADF方法，其中SADF方法选择载入不同的模型就可以成为不同的检查方法，特别的，载入sm_poly_1等模型时就是SMT方法。
+6.注意：这里给出的SADF与SMT检验都只是对单泡沫进行检验，如果需要对多泡沫检验可以改为滑动窗口或者gsadf检验。注意2：需要根据模拟计算出临界值，方便确认数据是否显著。
+'''
+
+# %%
+#第十八章 Entropy Features
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -6948,6 +7221,5 @@ allocations?
 
 
 '''
-第十七章：
-
+第十八章 ：嫡特征
 '''
