@@ -7204,7 +7204,68 @@ else:
 # %%
 #第十八章 Entropy Features
 
+'''
+18.1 Form dollar bars on E-mini S&P 500 futures:
+(a) Quantize the returns series using the binary method.
+(b) Quantize the returns series using the quantile encoding, using 10 letters.
+(c) Quantize the returns series using the sigma encoding, where 𝜎 is the stan
+dard deviation of all bar returns.
+(d) Computetheentropyofthethreeencodedseries,usingtheplug-inmethod.
+(e) Compute the entropy of the three encoded series, using Kontoyiannis’
+method, with a window size of 100.
+'''
 
+'''
+18.2 Using the bars from exercise 1:
+(a) Compute the returns series, {rt}.
+(b) Encode the series as follows: 0 if rtrt−1 < 0, and 1 if rtrt−1 ≥ 0
+(c) Partition the series into 1000 non-overlapping subsets of equal size (you
+may have to drop some observations at the beginning).
+(d) Compute the entropy of each of the 1000 encoded subsets, using the plug
+in method.
+(e) Compute the entropy of each of the 1000 encoded subsets, using the Kon
+toyiannis method, with a window size of 100.
+(f) Compute the correlation between results 2.d and 2.e.
+'''
+
+'''
+18.3 Draw 1000 observations from a standard Normal distribution:
+(a) What is the true entropy of this process?
+(b) Label the observations according to 8 quantiles.
+(c) Estimate the entropy using the plug-in method.
+(d) Estimate the entropy using the Kontoyiannis method:
+(i) using a window size of 10.
+(ii) using a window size of 100.
+'''
+
+'''
+18.4 Using the draws from exercise 3, {xt}t=1,…,1000:
+(a) Compute yt = 𝜌yt−1 +xt, where 𝜌 = .5, y0 = 0.
+(b) Label {yt} the observations according to 8 quantiles.
+(c) Estimate the entropy using the plug-in method.
+(d) Estimate the entropy using the Kontoyiannis method
+(i) using a window size of 10.
+(ii) using a window size of 100.
+'''
+
+'''
+18.5 Suppose a portfolio of 10 holdings with equal dollar allocations.
+(a) The portion of the total risk contributed by the ith principal component is
+1
+10
+, i = 1,…,10. What is the portfolio’s entropy?
+(b) The portion of the total risk contributed by the ith principal component is
+1 − i
+55
+, i = 1,…,10. What is the portfolio’s entropy?
+(c) The portion of the total risk contributed by the ith principal compo
+nent is 𝛼 1
+10 
++ (1 − 𝛼)(1 − i
+55
+), i = 1,…,10, 𝛼 ∈ [0,1]. Plot the portolio’s
+entropy as a function of 𝛼.
+'''
 
 
 
@@ -7222,4 +7283,40 @@ else:
 
 '''
 第十八章 ：嫡特征
+1.对收益率、价格序列进行处理后获取到熵值。可以滚动计算。熵特征用于识别市场状态，趋势还是震荡，熵突增（一阶差分）是否意味着
+市场的突变。等等。
+2.基于上述目的，计算一种熵并进行差分作为一个特征工程放入因子里面是最基础的用法。
+3.有多种熵的计算方法，等因子研究部分搭建好后，使用因子研究的内容确定使用那种熵计算方法最优。这一章相当于免费送了一个好用的因子。特别是在构建
+趋势类策略时。   必须要加入的一个特征因子。
+
+
+延伸；
+1.确定是否有套利空间。熵越高，价格序列所含的冗余信息越少，市场的效率就越高，越难以套利。——————对单个品种来说，而且也没有弄清楚套利的方式。那么这样的一个判断就仅是落在学术上的，而很难说是应用在市场上。
+
+'''
+
+
+#%%
+
+
+
+
+
+
+
+
+
+
+'''
+第十九章： 微观结构特征
+1.这一章的内容聚焦于order book 的内容及其特征。在订单簿上能够提取到什么信息，提供了三代不断演化至今的模型。订单簿部分距离有点遥远了，做高频可以用的上。
+2.也在这一章里一窥做市场和高频交易者的对战。
+3.除掉三代模型外，一些可能有用的特征也可以在订单簿里提取出来，但是任旧是基于超短时间内才使用的上的:
+    Easley 等人 [2016] 研究了按交易规模划分的交易频率，发现金额为整数倍的交易异常频繁。例如，交易频率随交易规模的增大而迅速下降，但金额为 {5, 10, 20, 25, 50, 100, 200,…} 的整数倍交易除外。这些作者将这一现象归因于所谓的“鼠标”或“GUI”交易员，即通过点击图形用户界面（GUI）上的按钮来下单的人类交易员。以 E-mini 标准普尔 500 指数为例，规模为 10 的交易频率是规模为 9 的 2.9 倍；规模为 50 的交易频率是规模为 49 的 10.9 倍；规模为 100 的交易频率是规模为 99 的 16.8 倍；规模为 200 的交易频率是规模为 199 的 27.2 倍；规模为 250 的交易频率是规模为 249 的 32.5 倍；规模为 500 的交易频率是规模为 499 的 57.1 倍。这种模式并不常见于“硅基交易员”，后者通常被编程为随机化交易，以掩盖其在市场中的踪迹。
+    一个有用的功能可能是确定整数规模交易的正常频率，并监测与该预期值的偏差。例如，机器学习算法可以判断，较大比例的整数规模交易是否与趋势相关，因为人类交易者倾向于基于基本面观点、信念或确信进行押注。相反，整数规模交易比例低于往常，则可能增加价格横盘整理的可能性，因为硅交易者通常不持有长期观点。
+
+bonus：
+1.卡尔曼滤波，用直白的话来讲，就是你有多个不确定的结果，经过分析、推理和计算，获得相对准确的结果.比如应用在多个市值预测值时，找到一个最终均衡考虑各个预测点的值。当然有其应用的前提和条件才行。
+2.dollar bar 的重采样必须要要按约等于天级别的金额吗，如果是半天会影响其平稳性吗，1.5天呢——————不需要非得是一天，可以是0.5天甚至更少，只要数据重采样后接近正态分布即可，趋近极限的话，可以考虑是否接近于0自相关，更小的时间间隔可以使得策略更为灵敏一些。
+3.在重采样成dollar bar中，如果有一笔超大单回导致什么结果 数据还会均衡吗——正态性会检验不通过，所以也不能阈值搞的太小。所以不能太小，要保留有冗余。
 '''
