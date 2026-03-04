@@ -1283,6 +1283,13 @@ plt.show()
 #Advances in Financial Machine Learning, page 52
 # 也就是先让模型尽可能多的预测出正类（高召回率），然后再用元模型去过滤掉错误的正类（高精准率），从而提升整体的精确率
 
+'''
+第三章总结：
+1.构建三重障碍标签，根据止盈止损及持有期构建出，也可以是动态的上下限，用于训练元模型。
+2.元模型利用 Meta-label 来学习如何过滤主模型的信号，来决定是否下注，下注大小及方向的派生模型
+3.可以删除一部分异常的metalabel，剔除噪音后模型效果会更好。如果metalabel非常的不平衡的话，比如1的值有89%，0的值有2%，-1的值有9%，那么可以剔除掉0的标签。
+4.
+'''
 
 
 #%%
@@ -1609,9 +1616,39 @@ would be the updated probabilities for the third draw
 '''
 第四章总结：
 1.本章数学含量极大，终于知道为什么做量化需要找清北数学系的了。 但是没关系，不需要做到那么极限的数学也足够了
-2.这章主要是关注了样本权重的问题。一是样本的唯一性（事件使用的bar重叠），二是样本的时间衰减性，三是样本（事件）类别不平衡性
+2.这章主要是关注了样本权重的问题，解决数据并不是独立同分布的问题。一是样本的唯一性（事件使用的bar重叠），二是样本的时间衰减性，三是样本（事件）类别不平衡性
+3.需要计算每个bar的平均唯一性，然后进行顺序抽样，得到一个新的样本序列。
+4.本章介绍的方法是使用的是计算平均唯一性，顺序抽样法，绝对收益及唯一性权重调整，时间衰减，类别权重。——————这部分我应该如何跟主题联系起来？
+
+平均唯一性：
+• 方法介绍：由于金融标签（如使用三屏障法产生的标签）通常覆盖一段时期的收益，不同样本的时间区间会发生重叠。
+    ◦ 并发量 ：首先计算在任意时刻 t，有多少个样本的生命周期涵盖了该时刻。
+    ◦ 唯一性 ：样本 i 在时刻 t 的唯一性是并发量的倒数。
+    ◦ 平均唯一性 ：样本 i 在其整个生命周期内的平均唯一性。
+• 应用：在元模型的训练中，可以将平均唯一性作为样本的初始权重。如果使用的是集成算法（如 BaggingClassifier），可以将 max_samples 参数设置为样本平均唯一性的均值，以降低重叠样本对模型的过度影响
+
+顺序自助法：
+ 产生一个更接近独立同分布（IID）的训练子集，应用在元模型的训练上，从而使集成算法（如随机森林）中的各个弱分类器更加多样化，提高模型的预测能力并减少过拟合
 
 
+基于收益归因的样本权重 (Return Attribution Weighting)：
+ 不仅考虑样本的唯一性，还考虑了收益率的大小，通过将此权重传递给分类器的 fit 方法，模型会更加关注那些不仅唯一且包含重要价格变动信息的样本。应用于元模型的训练，比平均唯一性更多的考虑了样本的收益率。
+ 
+
+时间衰减权重 (Time Decay)：
+   使用分段线性衰减函数，根据样本的累积唯一性而非仅仅是时间戳来降低旧样本的权重。
+   通过设置衰减参数 c，研究者可以决定权重的衰减速度。例如，c=0 意味着旧权重的权重线性衰减至零；c<0 甚至可以完全抹去最旧的一部分样本
+
+
+类别权重 (Class Weights):
+在 Scikit-learn 的库中，通常通过设置 class_weight='balanced' 来自动调整权重，使得所有类别的出现频率在训练时被模拟为相等。这能强迫算法提高对稀有类别的识别准确率，而不是简单地为了追求整体准确率而忽略它们
+
+在实际训练元模型中，上面的几个方法需要全部使用。
+第一步：计算唯一性。首先利用样本的重叠区间计算每个样本在时间轴上的并发性和平均唯一性。这是后续所有权重计算的基础。
+第二步：计算收益归因权重。在平均唯一性的基础上，引入样本生命周期内的绝对对数收益率。这一步生成的初始权重 w 确保了模型会更加关注那些不仅独特且包含重大价格变动信息的样本。
+第三步：应用时间衰减。将上一步得到的权重乘以一个时间衰减因子。这个衰减不是单纯基于时间，而是基于累积唯一性，从而降低旧样本的权重，使模型适应不断演化的市场环境
+第四步：通过顺序自助法采样：在训练集成模型（如随机森林）时，不再使用传统的随机抽样，而是使用顺序自助法来从上述带有最终权重的样本库中抽取子集。这种采样方式会根据样本间的重叠程度动态调整抽取概率，确保抽出的训练子集更接近独立同分布。
+第五步：设置 class_weight='balanced' 来自动调整类别权重 (Class Weights)
 '''
 
 
@@ -2245,6 +2282,8 @@ diff_Series_label=generate_metalabels(diff_Series_event, diff_Series['close'], d
 1.本章关注的是数据的平稳性与记忆性。关于记忆性的问题，切分样本的时候是不是尽量要按顺序切分，否则就破坏的记忆性（趋势性）
 2.直接使用fracdiff这个包找到指定置信度（一般5%）下的最小差分阶d，就是具有最高记忆性且平稳的差分数据了。
 3.from fracdiff.sklearn import FracdiffStat 就可以直接找到对应的最小d值了，使用前先用from fracdiff.sklearn.tol import window_from_tol_coef 确定指定阈值下的窗口大小。这个包的应用例子都在上面
+4.对dollar bar 后的log price进行差分。主模型和元模型都使用经过分数阶差分后的数据。使用固定窗口法FFD，差分阶数d越小越好。
+5.注意，在因子挖掘，主模型训练，元模型训练这三个阶段中，如果使用了分数阶差分，最好保持相同的窗口大小和分数阶，避免数据信息传导有误。
 '''
 
 
@@ -2252,18 +2291,7 @@ diff_Series_label=generate_metalabels(diff_Series_event, diff_Series['close'], d
 #模型 ：6-9章是介绍模型的使用
 #第六章
 
-#模型设置关键参数：
-'''
-随机森林模型：
-1.max_features 设置小一点，可以增加树的差异性
-2.将正则化参数 min_weight_fraction_leaf 设置为足够大的值（例如 5%），以使袋外准确率收敛到样本外（k 折）准确率
-3.修改 RF 类，将样本取样从标准自助法改为顺序自助法  （见第四章代码）
-4.可以先对特征进行主成分分析（pca），降低过拟合。
-5.class_weight='balanced_subsample' 降低样本不平衡性带来的影响。
-6.criterion='entropy' 提升模型性能
-clf0=RandomForestClassifier(n_estimators=1000,class_weight='balanced_subsample',
-criterion='entropy') 
-'''
+
 
 '''
 6.1 Why is bagging based on random sampling with replacement? Would bagging
@@ -2342,6 +2370,20 @@ bagging_rf_clone = BaggingClassifier(
 金融数据适用于bagging，过拟合的后果往往是灾难性的。而且信噪比低，很容易过拟合
 '''
 
+#模型设置关键参数：
+'''
+随机森林模型：
+1.max_features 设置小一点，可以增加树的差异性
+2.将正则化参数 min_weight_fraction_leaf 设置为足够大的值（例如 5%），以使袋外准确率收敛到样本外（k 折）准确率
+3.修改 RF 类，将样本取样从标准自助法改为顺序自助法  （见第四章代码）
+4.可以先对特征进行主成分分析（pca），降低过拟合。
+5.class_weight='balanced_subsample' 降低样本不平衡性带来的影响。
+6.criterion='entropy' 提升模型性能
+clf0=RandomForestClassifier(n_estimators=1000,class_weight='balanced_subsample',
+criterion='entropy') 
+'''
+
+
 #%%
 #第七章 交叉验证
 
@@ -2357,7 +2399,7 @@ bagging_rf_clone = BaggingClassifier(
  7.2 Take a pair of matrices (X,y), representing observed features and labels. These
  could be one of the datasets derived from the exercises in Chapter 3.
 (a) Derive the performance from a 10-foldCV of a RFclassifier on (X,y),without shuffling.
- (b) Derive the performance from a 10-fold CVofanRFon(X,y),with shuffling.
+ (b) Derive the performance from a 10-fold CV of an RF on(X,y),with shuffling.
  (c) Why are both results so different?
  (d) How does shuffling leak information?
 '''
@@ -2551,6 +2593,8 @@ class PurgedKFold(_BaseKFold):
         Extend KFold to work with labels that span intervals 
         The train is purged of observations overlapping test-label intervals 
         Test set is assumed contiguous (shuffle=False), w/o training examples in between
+
+        这个类已经实现了清除和禁止，直接使用即可
     ''' 
     def __init__(self,n_splits=3,t1=None,pctEmbargo=0.): 
             if not isinstance(t1,pd.Series): 
@@ -2599,6 +2643,7 @@ def cvScore(clf,X,y,sample_weight,scoring='neg_log_loss',t1=None,cv=None,cvGen=N
             score_=accuracy_score(y.iloc[test],pred,sample_weight=sample_weight.iloc[test].values)
         score.append(score_)
     return np.array(score)
+
 
 # 生成样本权重 根据df_final这个事件生成，观察来看是有重叠的
 sample_weight = pd.Series(np.ones(len(X_final)), index=X_final.index)
@@ -3432,8 +3477,8 @@ MA10	0.01（被掩蔽）	                0.10
 第八章总结：
 1.要认识到回测是验证手段而不是探索发现真理的方法，特征重要性才是探索的工具。
 2.如何评估特征重要性？PCA正交降维+MDI（随机森林的feature_import，会有替代效应，所以必须使用pca）/MDA（平均准确性下降,使用袋外样本，不限于随机森林模型，更泛用，也会有替代效应）/SFI（单个特征的重要性，可能会丢失特征交互效应）
-3.为了避免书里列出的部分缺陷（section 8.2  8.3 遮蔽效应），需要使用改进后的模型（max_features=1,且是决策树分类器）+改进后的特征重要性计算函数，而不是使用sklearn自带的。 此外数据的处理也需要执行清楚和禁运，事件等内容，这些内容是累积上去的，而不是割裂存在的。——————所以计算MDA时，就不要使用传入的clf了，使用featImportance里面设置的集成决策树模型!!!!! 这一步很关键
-4.对第三点的衍生：由于使用max_features=1的树模型会导致所有特征的SFI都相同，而MDA，SFI是可以应用于所有分类器的，所以传入一个clf模型进去，防止SFI计算失效
+3.为了避免书里列出的部分缺陷（section 8.2  8.3 遮蔽效应），需要使用改进后的模型（max_features=1,且是决策树分类器）+改进后的特征重要性计算函数，而不是使用sklearn自带的。 此外数据的处理也需要执行清楚和禁运，事件等内容，这些内容是累积上去的，而不是割裂存在的。——————所以计算MDI时，就不要使用传入的clf了，使用featImportance里面设置的集成决策树模型!!!!! 这一步很关键
+4.对第三点的衍生：由于使用max_features=1的树模型会导致所有特征的SFI都相同，而MDA，SFI是可以应用于所有分类器的，只需要在计算MDI时使用max_features=1的树模型即可。
 5.MDI只能用于随机森林模型，由于遮蔽效应，替代效益等，导致偏差，所以仅适用于初筛，应该以MDA作为基准，SFI进行辅助为佳。
 6.MDA和MDI都会有跳跃下跌的特征，倒序排列，差一行的差别大约有3倍这样，反正差了好几倍的。只使用跳跃下降前的数据即可。
 7.经过两个模型（trnsX_union）的结果对比，在混合模型MDA中表现较好的，在原模型也标准较好。但是有MDA误杀的特征，在MDI中没有，但是错杀的都是冗余字段。用MDA校准MDI（例如：MDI排名前10但MDA不显著 → 删除），这样更严格，找到的重要性更有效。
@@ -3475,16 +3520,16 @@ def clfHyperFit(feat, lbl, t1, pipe_clf, param_grid, cv=3, bagging=[0, None, 1.]
                 rndSearchIter=0, n_jobs=-1, pctEmbargo=0.01, **fit_params):
     '''
     注意：
-    1.样本权重必须要在**fit_params里面传入，而且要以{Pipeline[-1][0]}__sample_weight的形式传入,Pipeline[-1][0]就是构造的Pipeline最终的分类器名称。   ————这样样本权重已经被正确的传入了网格搜索和模型里
+    1.样本权重必须要在**fit_params里面传入，而且要以{Pipeline[-1][0]}__sample_weight的形式传入,Pipeline[-1][0]就是构造的Pipeline最终的分类器名称。   ————这样样本权重已经被正确的传入了网格搜索和模型里 得到scoring里面也是带有权重的。
 
 
     '''
     # 1) 设置评分标准
     # if set(lbl.values) == {0, 1}: 
-    #     scoring = 'f1'  # F1分数用于二分类问题
+    #     scoring = 'f1'  # F1分数用于metalabel 的预测
     # else:
-    #     scoring = 'neg_log_loss'  # 对数损失，用于多分类问题
-    scoring = 'neg_log_loss'  # 对9.1的临时使用
+    #     scoring = 'neg_log_loss'  # 对数损失，用于大部分量化场景
+    scoring = 'neg_log_loss'  
     # scoring = 'accuracy'
 
     inner_cv = PurgedKFold(n_splits=cv, t1=t1, pctEmbargo=pctEmbargo)  
@@ -5707,7 +5752,7 @@ print(f"DSR: {psr:.4f}，是否统计显著：{'是' if psr > 0.95 else '否'}")
     胜率，
     平均每笔的盈利与亏损，
     索诺比率，
-    hh 集中度：描述正收益，负收益，按时间收益是否集中，顺滑，没有肥尾。即收益曲线是否是偏向顺滑的，还是激增。（SNIPPET 14.3 ） 理想情况是 h+（正收益集中度）很低，h-（负收益集中度低），h_t(时间收益集中度低)
+    hhi 集中度：描述正收益，负收益，按时间收益是否集中，顺滑，没有肥尾。即收益曲线是否是偏向顺滑的，还是激增。（SNIPPET 14.3 ） 理想情况是 h+（正收益集中度）很低，h-（负收益集中度低），h_t(时间收益集中度低)
     回撤（drawdown,DD）：收益序列两个高点间的最大损失，
     最大回撤：所有回撤里面最大的，
     水下时间（The time under water,TuW）：是指从一个高点到盈亏超过之前最大盈亏之间经过的时间,
