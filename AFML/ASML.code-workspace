@@ -6,5 +6,9 @@
         {
             "path": "../../sol_trade-meme"
         }
-    ]
+    ],
+    "settings": {
+        "python.defaultInterpreterPath": "/home/ysb_rust/.venv-qr311/bin/python",
+        "python.terminal.activateEnvironment": true
+    }
 }
