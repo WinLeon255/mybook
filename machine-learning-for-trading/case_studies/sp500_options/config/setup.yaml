@@ -1,0 +1,363 @@
+strategy_id: sp500_options
+setup_version: v1
+
+universe:
+  underlying: sp500_constituents
+  strategy: atm_straddle
+  # Distinct S&P 500 underlyings with listed options in the tradable price panel
+  # over the full sample (includes index membership churn). Display metadata only
+  # (read by 03_case_study_overview); the backtest counts assets from data.
+  n_assets: 627
+
+decision:
+  entry_cadence: weekly_friday
+  entry_time: friday_close
+  # The AlgoSeek option chain is one end-of-session quote per contract per day
+  # (LastBidPrice / LastAskPrice / LastMidPrice); it carries no open, high or low.
+  # Every fill in this case study is therefore priced at a close, one session after
+  # the signal. Read by backtest_loaders.get_backtest_config and resolved through
+  # backtest_presets._EXECUTION_MODE_BY_DELAY, where this token maps to next_bar -
+  # the same execution mode MONDAY_OPEN mapped to, so no fill moves.
+  execution_delay: next_session_close
+  holding_period_days: 10
+  exit_time: 10_days_after_entry_or_expiry
+  hedge_cadence: daily_close
+
+# Read by case_studies.utils.backtest_runner: delta_threshold drives the
+# per-position rehedge trigger in the HTM cohort engine.
+hedging_protocol:
+  hedge_instrument: underlying_stock
+  hedge_frequency: daily_close
+  delta_threshold: 0.1
+  gamma_hedging: false
+  vega_hedging: false
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# sp500_options runs through the HTM daily-MTM cohort path (_run_htm_daily_mtm)
+# for ret_to_expiry and the simple vectorized path (_run_vectorized) for
+# other labels; neither engages the integer-contract execution engine, so
+# ``initial_cash`` and ``share_type`` are recorded for spec-hash provenance
+# but do not constrain position sizing. The HTM path allocates fractional
+# weights across n_roll concurrent cohorts; SPX-option-notional vs. cash
+# is not a binding constraint in this CS.
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). Daily underlying SPX returns → 63 ≈ 3 months. Option
+# contracts cycle in/out of the per-expiry universe within the window;
+# moment-based allocators include them anyway so the cross-method
+# comparison is honest — early-window imputation effects are part of the
+# observed concentration profile and not hidden behind a method filter.
+execution:
+  initial_cash: 100_000          # IBKR retail cohort default (not enforced by HTM path)
+  share_type: integer            # Recorded for spec-hash; HTM path uses fractional cohort weights
+  allocator_lookback: 63         # 3 months of daily underlying SPX bars
+
+mapping:
+  class: systematic_straddle_sell
+  position_state_space: short_straddle_hedged
+  entry_logic: sell_atm_straddle_weekly
+  sizing: fixed_vega_notional
+
+costs:
+  class: dominant
+  components:
+    option_spread:
+      description: Bid-ask spread on straddle.
+      estimate_pct_of_premium: [2.0, 5.0]
+      note: ATM options have wide spreads relative to premium.
+    hedge_spread:
+      description: Bid-ask spread on underlying stock per hedge rebalance.
+      estimate_bps_of_notional: 0.5
+      hedges_per_holding: 10
+    commission:
+      description: Per-contract option commission and per-share equity commission.
+      option_per_contract: 0.65
+      equity_per_share: 0.005
+    margin_opportunity_cost:
+      description: Capital tied up in margin (15-20% of notional, ~5% annual opportunity cost).
+      margin_pct_of_notional: [15, 20]
+      opportunity_cost_annual_pct: 5.0
+  cost_dominance_note: Total costs often exceed the expected VRP edge.
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Canonical strategy universe. sp500_options trades only the liquid
+    # quintile (bottom 20% half-spread per rebalance date) — the option
+    # round-trip cost on the full S&P 500 ATM straddle surface consumes
+    # the VRP edge (O'Donovan & Yu 2024). The full-universe variant is
+    # NOT a sweep candidate for the canonical rank-1 selector; it lives
+    # only in the Ch18 ``htm_cost_cascade`` comparison table below, where
+    # it serves to show the cost story (full universe → uneconomic;
+    # liquid quintile → marginal-but-positive after costs).
+    # Read by case_studies.utils.sweep_config.get_universe_filters_for.
+    universe_filter: liquid
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    # Ch16 signal-stage selection. Long-only equal-weight top-k: the short
+    # straddle sign convention is handled by the label construction, not
+    # by long_short=True.
+    top_k_grid:
+      # sp500_options effectively has one label: `ret_to_expiry`. The
+      # 5d/10d/dh_5d/dh_10d labels were dropped 2026-05-17 because the
+      # vectorized backtest path treats their 5d/10d forward returns as
+      # daily returns, inflating Sharpes (e.g. fwd_ret_10d Sharpe ~6.5)
+      # to non-credible levels. A proper 10d short-vol comparison would
+      # need a fixed-holding cost model (entry + exit half-spread + 2x
+      # commission), not the HTM single-entry-leg cost. See
+      # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
+      ret_to_expiry:   [5, 10, 20]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) use the CS-level
+    # ``execution.allocator_lookback`` on the underlying SPX series; option
+    # contracts cycling in/out of the per-expiry universe are part of the
+    # observed concentration profile, not hidden behind a method filter.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+    # Ch18 cost analysis is the three-rung hold-to-maturity cascade
+    # (O'Donovan & Yu 2024, anchored to Muravyev & Pearson 2020). The
+    # standard cost_grid_bps regime does not apply: HTM avoids the
+    # exit-leg spread entirely and only pays a fraction of the quoted
+    # option half-spread on entry. The cascade rungs (rung-2 = full
+    # universe; rung-3 = bottom-quintile half-spread "liquid" subset) are
+    # dispatched inline by Ch18 cost notebooks and do not flow through the
+    # standard run_backtest cost sweep.
+    htm_cost_cascade:
+      # Entry-cost fractions of the quoted option half-spread. 0.203 is the
+      # best-case algo-execution anchor (Heston et al. 2023 "algo" case, from
+      # Muravyev-Pearson 2020's $0.026/$0.128 ATM ratio); 0.75 approximates the
+      # population-average effective/quoted ratio; 1.0 = full quote crossed.
+      cost_fractions: [0.203, 0.5, 0.75, 1.0]
+      # Universes (rung dispatch): full = rung-2, liquid = rung-3.
+      universes: [full, liquid]
+      # Liquid-universe selection: bottom 20% half-spread per rebalance date.
+      # Stricter than O'Donovan & Yu (2024), who retain the bottom four deciles
+      # (~40%, approximating Heston et al.'s "spread < 10%" filter); our quintile
+      # is the tighter-spread half of their set.
+      liquid_quantile: 0.20
+      # Concentration for the cascade (single top_k; not swept).
+      top_k: 20
+
+evaluation:
+  n_splits: 2
+  train_size: 2Y
+  val_size: 1Y
+  holdout_start: '2021-01-01'
+  holdout_end: '2021-12-31'
+  calendar: NYSE
+  periods_per_year: 252  # NYSE 5d/wk (daily MTM over overlapping weekly cohorts)
+
+labels:
+  primary: ret_to_expiry
+  buffer: 35D
+  # Legacy 5d/10d/dh_5d/dh_10d variants were dropped from the sweep
+  # 2026-05-17; the label-computation notebook (`02_labels.py`) still
+  # demonstrates how they are constructed, but they no longer drive
+  # backtests, cohort_metrics, or rank-1 selection. See
+  # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
+  variants: []
+  # Diagnostic-only labels: the four fixed-horizon variants below are NOT in
+  # the sweep, and their parquets are written by 02_labels.py for the notebooks
+  # that read them (03_financial_features and 05_evaluation contrast the primary
+  # against fwd_ret_dh_10d; 90_ic_diagnostic reads fwd_ret_10d and
+  # fwd_ret_dh_10d for the IV-decay analysis). Declaring each here is what makes
+  # the written label set equal the declared one, and gives
+  # `resolve_label_buffer` / `resolve_label_horizon` a value for each without
+  # re-introducing the variant into the sweep / cohort_metrics.
+  variant_buffers:
+    fwd_ret_5d: 5D
+    fwd_ret_10d: 10D
+    fwd_ret_dh_5d: 5D
+    fwd_ret_dh_10d: 10D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  #
+  # The primary label `ret_to_expiry` uses a multi-cohort daily-MTM
+  # backtest path (5 concurrent cohorts at 1/5 capital each; weekly entry
+  # at ~30-day DTE) that accrues per-cohort daily premium + hedge P&L with
+  # transaction costs. The rebalance_step value below is the design-time
+  # constant for the (weekly_friday, 30-day DTE) pair and is used by any
+  # non-equal-weight allocation step that runs before the HTM dispatch.
+  rebalance_step:
+    ret_to_expiry: 5    # weekly_friday schedule, ~30d DTE -> ceil(30/7) = 5
+
+# Read by 03_financial_features. Every window, threshold and ranked column the
+# feature matrix is built from is declared here, and the notebook binds rather
+# than retypes it: the register below, the warmup audit and the timing figure all
+# have to agree on the same numbers, and a window typed in the notebook is a
+# second source of truth for that agreement.
+features:
+  # The straddle selection targets this many calendar days to expiry, which is
+  # also the divisor that puts `instr_dte` on a [0, 1] scale.
+  target_dte: 30
+  # Sessions a position is held: the primary label runs to the ~30-calendar-day
+  # expiry, which is about 21 NYSE sessions. F6 reads the ordering out to twice
+  # this, because a feature whose ordering has decayed inside the holding period
+  # cannot be traded at this cadence.
+  hold_sessions: 21
+  windows:                       # all counted in NYSE sessions
+    underlying_return: [1, 5, 10, 21]
+    realized_volatility: [5, 10, 21, 42, 63]
+    volume_zscore: 20
+    instrument_return: [1, 5]
+    instrument_cost_momentum: 5
+    vrp: [5, 10, 21, 42, 63]
+    vrp_reference: 21            # the VRP horizon the ratio, z-score and rank read
+    vrp_zscore: 252
+    vrp_momentum: [5, 10]
+    iv_zscore: [63, 252]
+    iv_momentum: [5, 10, 21]
+  # A 30-day ATM straddle is not listed for every symbol on every session: 7.9%
+  # of consecutive straddle rows are more than one session apart. Every window
+  # above is therefore counted on the underlying's own session grid rather than
+  # on the straddle rows, and this is the share of that grid that must carry a
+  # straddle quote before a window produces a value. At 1.0 a 252-session
+  # z-score survives on 6.8% of rows; at 0.8 it survives on 57%.
+  min_observations_fraction: 0.8
+  thresholds:
+    vega_floor: 0.001                # theta/vega is unreadable as vega goes to zero
+    realized_volatility_floor: 0.01  # 1% annualized, the floor of the IV/RV ratio
+  # Percentile within the decision date. The source column on the left, the
+  # shipped column name on the right; every later stage reads these names.
+  ranked:
+    vrp_21d: vrp_21d_pctl
+    iv_atm: iv_atm_pctl
+    instr_rel_spread: spread_pctl
+    iv_rv_ratio: iv_rv_ratio_pctl
+  # The one null policy, applied once: a row is kept when the premium the thesis
+  # is about can be measured on it at the reference horizon.
+  #
+  # `iv_mom_10d` was a third member until the windows moved onto the session grid.
+  # It cost nothing while a 10-row shift was called a 10-session change, and once
+  # it means one, it is null for every symbol quoted in bursts shorter than ten
+  # sessions - which cuts the panel from 620 symbols to 322. That is a liquidity
+  # screen, not a warmup rule, and it is not what a null policy is for. The column
+  # is still shipped; it is null where the quote cadence cannot support it.
+  null_policy: [vrp_21d, rv_21d]
+  # Columns written for the backtest and the reader to price a position against,
+  # and excluded from the register because they are not features.
+  metadata: [underlying_price, instr_mid, instr_bid, instr_ask]
+  families:
+    - name: instrument_state
+      pattern: instr_rel_spread|instr_pct_of_S|instr_dte|dte_normalized|instr_delta|abs_net_delta|instr_gamma|instr_theta|instr_vega|theta_vega_ratio|instr_ret_*
+      role: state
+      hypothesis: What the straddle costs and how it is exposed decides whether a premium is collectable, not whether one is on offer
+      inputs: straddle quotes and Greeks
+      lookback: 5
+      lag: 0
+      frame: one symbol's own straddle series
+      representation: level, ratio and change
+      failure_mode: the 30-day ATM straddle is a different contract most days, so a change in its price is not a return anyone held
+    - name: surface_level
+      pattern: iv_atm|call_iv|put_iv|iv_skew_atm
+      role: signal
+      hypothesis: What the market charges for one month of variance today, and how asymmetrically
+      inputs: straddle implied volatilities
+      lookback: 0
+      lag: 0
+      frame: one symbol on one session
+      representation: annualized volatility level
+      failure_mode: an IV level that has not converged is a solver artefact, which is what the quality family flags
+    - name: surface_dynamics
+      pattern: iv_atm_z_*|iv_mom_*
+      role: signal
+      hypothesis: Implied volatility is mean-reverting, so where it sits against its own recent history ranks better than its level
+      inputs: straddle implied volatilities
+      lookback: 252
+      lag: 0
+      frame: one symbol's own session history
+      representation: z-score and change
+      failure_mode: a symbol quoted intermittently has fewer observations in the window than sessions, which the minimum-observation rule bounds
+    - name: variance_risk_premium
+      pattern: vrp_5d|vrp_10d|vrp_21d|vrp_42d|vrp_63d|iv_rv_ratio|vrp_zscore_252|vrp_mom_*|instr_cost_mom_5d
+      role: signal
+      hypothesis: Implied variance exceeds subsequently realized variance, and the gap is wider for some names than others
+      inputs: straddle implied volatility and underlying realized volatility
+      lookback: 252
+      lag: 0
+      frame: one symbol's own session history
+      representation: difference, ratio, z-score and change
+      failure_mode: it contrasts a forward-looking quote with a backward-looking estimate, so it is a premium only if realized volatility persists
+    - name: realized_volatility
+      pattern: rv_*
+      role: state
+      hypothesis: What the underlying has actually done sets the scale the premium is read against
+      inputs: underlying adjusted closes
+      lookback: 63
+      lag: 0
+      frame: one security identity's own session history
+      representation: annualized volatility level
+      failure_mode: a return that spans a security identity change is a corporate action, not a move
+    - name: cross_sectional
+      pattern: '*_pctl'
+      role: signal
+      hypothesis: The strategy sells some straddles and not others, so only relative standing within the date can drive it
+      inputs: the level features named in features.ranked
+      # The percentile is a within-date operation and adds no lookback of its own, so this is the
+      # longest window any of its four ranked sources reads: vrp_21d and iv_rv_ratio both read
+      # rv_21d, and iv_atm and instr_rel_spread are contemporaneous.
+      lookback: 21
+      lag: 0
+      frame: every symbol quoted on the decision date
+      representation: percentile in (0, 100)
+      failure_mode: on a thin date the percentile is an ordering of a few dozen names and moves for reasons the level did not
+    - name: underlying
+      pattern: ret_*|volume_zscore
+      role: state
+      hypothesis: Direction and participation in the underlying condition what a short-volatility position earns
+      inputs: underlying adjusted closes and volume
+      lookback: 21
+      lag: 0
+      frame: one security identity's own session history
+      representation: return and z-score
+      failure_mode: volume is not adjusted for splits, so its z-score restarts with the security identity
+    - name: quality
+      pattern: qc_*
+      role: state
+      hypothesis: Nothing - these should not predict, and are carried so a model can be checked for leaning on them
+      inputs: solver convergence codes
+      lookback: 0
+      lag: 0
+      frame: one symbol on one session
+      representation: indicator
+      failure_mode: a control that does predict is evidence the panel is contaminated, not evidence of a signal
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+
+causal:
+  treatment: vrp_21d
+  confounders: [rv_21d, vrp_mom_5d, spread_pctl]
+  method: walk_forward_dml
